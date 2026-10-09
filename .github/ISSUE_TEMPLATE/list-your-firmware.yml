@@ -1,0 +1,34 @@
+name: List your firmware
+description: Ask for your firmware to be added to the README
+title: "List: <name>"
+labels: ["listing"]
+body:
+  - type: input
+    id: name
+    attributes: {label: Name}
+    validations: {required: true}
+  - type: input
+    id: link
+    attributes: {label: Project link, description: Public repository or release page}
+    validations: {required: true}
+  - type: input
+    id: device
+    attributes: {label: Device, placeholder: M-VAVE FM-1}
+    validations: {required: true}
+  - type: input
+    id: licence
+    attributes: {label: Licence, placeholder: GPL-3.0-only}
+    validations: {required: true}
+  - type: textarea
+    id: about
+    attributes: {label: Description, description: Up to 200 characters}
+    validations: {required: true}
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirm
+      options:
+        - label: The project is public and says it uses felucca-bsp.
+          required: true
+        - label: This is not presented as an official product.
+          required: true
