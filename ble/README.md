@@ -5,7 +5,8 @@ Access and the BLE-MIDI service) and sends MIDI as notifications. About 3 KB of 
 
 It speaks standard HCI (H4 packet types), so it needs a controller below it and nothing else:
 
-    bleh_init(&h, name, send_fn)   bleh_start(&h)   bleh_rx(&h, pkt, len)   bleh_midi_send(&h, ts, msg, n)   bleh_poll(&h)
+    bleh_init(&h, send_fn, ctx, name)   bleh_start(&h)   bleh_rx(&h, h4_type, pkt, len)
+    bleh_midi_send(&h, msg, len, ts13)   bleh_poll(&h)
 
 Fixed on purpose: ATT MTU 23, no pairing, no scanning, one connection, MIDI messages of 1..3 bytes (no SysEx).
 
