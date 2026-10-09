@@ -9,6 +9,12 @@ Named after its first user, Felucca; it is not tied to that application.
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi. Product and company names
 belong to their owners.
 
+> **Work in progress: moving out of Felucca, licences under review**
+> This code is being moved here from Felucca. The MPL-2.0 headers describe the intended licence; they are not final
+> until every contributor whose code touches these files has been asked and has answered. Until then, treat the
+> licence status of each file as provisional, and check [LICENSING.md](LICENSING.md) and [NOTICE](NOTICE) for the
+> current state. Do not build a release on this yet.
+
 > **Licence notes before you start**
 > - A fork of Felucca cannot move to MPL-2.0 by using this repository. To use another licence, start a new project and import this one: [Forks of Felucca](LICENSING.md#forks-of-felucca).
 > - `chip/usb.c` is GPL-3.0-only. A firmware that includes it is GPL-3.0 as a whole: [`usb.c`](LICENSING.md#chipusbc).

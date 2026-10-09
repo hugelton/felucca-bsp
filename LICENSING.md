@@ -1,5 +1,8 @@
 # Licensing
 
+**Status: under review.** This repository is being moved out of Felucca. The licences below are the intended ones;
+they become final when the contributors involved have answered. Until then they are provisional.
+
 Every file under `chip/`, `boards/`, `loader/` and `examples/` is MPL-2.0 (SPDX header in each file), except
 `chip/usb.c`, which is GPL-3.0-only (text in `LICENSES/GPL-3.0-only.txt`). The full text
 is in `LICENSE`. The files carry no "Incompatible With Secondary Licenses" notice, so they can
