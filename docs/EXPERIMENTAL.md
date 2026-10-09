@@ -29,7 +29,7 @@ FM-1's USB-C port may not be able to supply 5 V (VBUS) or to switch to host at a
 
 ## BLE
 
-See `ble/` and `examples/hwtest-ble/`: a host that runs on a PC against a fake controller, and a survey of what
+See [ble-plan.md](ble-plan.md), `ble/` and `examples/hwtest-ble/`: a host that runs on a PC against a fake controller, and a survey of what
 the JieLi controller needs. Concept only.
 
 ## Clock up to 320 MHz
