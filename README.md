@@ -42,6 +42,9 @@ when they have been checked on a real unit.
 | `chip/usb.c` | The USB device: MIDI, serial and audio classes with the EP0 and poll code. **GPL-3.0-only**, see Licence |
 | `loader/` | The update loader (builds as a RAM image; it includes `chip/usb.c`, `chip/ota.c` and `chip/libc.c`) |
 | `boards/fm1/` | FM-1 wiring and drivers: LCD pins, key scan, ADC channels, audio codec lines |
+| `ble/` | **Beta.** A minimal BLE-MIDI sender over standard HCI; host-tested, not run on a device yet ([ble/README.md](ble/README.md)) |
+| `tools/` | Package builder (`fm1pkg.py`) and USB-MIDI installer (`fm1_install.py`) |
+| `examples/hwtest/` | A small firmware that exercises the screen, knob, buttons, LEDs and USB serial on a real FM-1 |
 | `examples/felucca/` | Reference only: `ota_hw.c`, the hooks Felucca gives `ota.c`. Not built here |
 
 Headers include each other by file name. Build with `-Ichip -Iboards/fm1`. The loader builds from this tree with
