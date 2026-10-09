@@ -1,4 +1,4 @@
-# hwtest-ble (beta, not complete)
+# hwtest-ble (concept: does not run)
 
 The BLE counterpart of `../hwtest`: the glue between `ble/` (the BLE-MIDI host) and JieLi's radio controller
 (`btctrler.a`, from the JieLi AC79 SDK).
