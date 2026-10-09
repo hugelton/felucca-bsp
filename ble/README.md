@@ -15,7 +15,7 @@ Fixed on purpose: ATT MTU 23, no pairing, no scanning, one connection, MIDI mess
 - Compiles for pi32v2.
 - **Not run on a device yet.** The part that is missing is the link to a controller: the FM-1's radio controller is
   JieLi's closed library, which is not in this repository and is not redistributed here. Whoever builds a BLE firmware
-  supplies it and an `hci_send` function for it. Whether the vendor controller accepts these HCI packets as written
+  supplies it (`tools/get_sdk.sh` fetches JieLi's SDK from JieLi; nothing of it is copied here) and an `hci_send` function for it. Whether the vendor controller accepts these HCI packets as written
   is the open question the first hardware spike answers.
 - Radio is off by default in any firmware. A BLE build is a separate build, and the radio rules of your country
   (for example, Japan's 技適 or an equivalent approval) apply to the device you put it on, not to this code.

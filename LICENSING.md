@@ -38,3 +38,7 @@ GPL project.
 `tools/fm1pkg.py` (package builder) and `tools/fm1_install.py` (USB-MIDI installer) are MPL-2.0, moved here from Felucca
 by their only author. Packages built by `fm1pkg.py` contain three files of the JieLi AC79 SDK (`uboot.boot`,
 `cfg_tool.bin`, `eq_cfg_hw.bin`), which are Apache-2.0: ship `LICENSES/Apache-2.0.txt` with every package.
+
+The JieLi SDK is never copied into this repository. `tools/get_sdk.sh` fetches it from JieLi's repository at a fixed revision and
+checks the hashes of the files this repository depends on. Its libraries (`*.a`) carry no separate licence statement
+of their own in the SDK; the SDK as a whole is declared Apache-2.0. That has not been confirmed with JieLi.
