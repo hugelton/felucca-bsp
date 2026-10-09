@@ -71,3 +71,28 @@ static uint32_t fm1_anim_level(uint32_t f, uint32_t id, uint32_t glow)
     e = d >= 0 ? (d * 3) >> 2 : (-d * 5) >> 1;    /* (no division: shifts) */
     return fm1_anim_q(fm1_anim_bright(e), glow && d > 0);
 }
+
+/* The idle animation (1.2, Discussion #135; MENU > ANIM IDLE, src/ui_input.c idle_leds): while the FM-1 sits idle a
+ * soft light drifts over the keys from F3 to G5 and back, and the buttons breathe with it. Endless, in cycles of
+ * FM1_IDLE_FRAMES frames (~9.0 s): the light's place eases from 0 to 30 half white keys in the first half and back in
+ * the second (a smoothstep of a triangle, as the breath: it slows down at either end, ~4.5 s a way); a key's
+ * brightness 2^-(e / 16) of lit, e = 24 + 16 per half white key from the light (~35 % of lit on it, half that a half
+ * white key away: two or three keys softly lit, never a bright one). The buttons, all together, from 1/64 of lit (the
+ * light at F3) up to 1/8 (at G5) and down again. With `glow` (MENU > LEDS DIM HI / DIM LO) every LED keeps the glow
+ * under it; without (OFF / INV) the rest is dark. The same levels as the power-on sweep (fm1_anim_q: lit frames /64,
+ * FM1_ANIM_GLOW): the scan draws them the same way. No division: shifts */
+#define FM1_IDLE_FRAMES 8192u    /* a cycle (a power of 2), frames (~9.0 s) */
+#define FM1_IDLE_E0 24           /* the light: 2^-1.5 of lit at its place */
+static uint32_t fm1_idle_level(uint32_t f, uint32_t id, uint32_t glow)
+{
+    uint32_t x = f & (FM1_IDLE_FRAMES - 1u);
+    int32_t d;
+    x = (x & (FM1_IDLE_FRAMES / 2u) ? FM1_IDLE_FRAMES - 1u - x : x) >> 4;   /* a triangle 0..255 */
+    x = x * x * (768u - 2u * x) >> 16;                 /* smoothstep, 0..255 */
+    if (id < FM1_ANIM_NBTN)
+        return fm1_anim_q(fm1_anim_bright(96 - (int32_t)(x * 48u >> 8)), glow);   /* 1/64 .. 1/8 */
+    if (id >= FM1_ANIM_NBTN + FM1_ANIM_NKEY)
+        return 0;
+    d = (int32_t)(x * 480u >> 8) - 16 * (int32_t)FM1_ANIM_X[id - FM1_ANIM_NBTN];   /* 1/16 half white keys */
+    return fm1_anim_q(fm1_anim_bright(FM1_IDLE_E0 + (d < 0 ? -d : d)), glow);
+}

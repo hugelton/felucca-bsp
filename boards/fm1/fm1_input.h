@@ -454,16 +454,27 @@ static void fm1__breath_frame(void)               /* (a new frame, before column
  * fm1_led_dim (the UI leaves them alone: fm1_led_anim_on), once a frame from the scan, at the end of the tick that
  * lights column 0 (after the lit write: no on-time lost; column 0 written again with the new frame's). Not inlined:
  * the tick's own code (its registers, its stack) stays as it was, a call in a branch never taken once it is over */
+/* 1.2: the idle animation (fm1_led_idle_start; fm1__an_idle) runs the same way, its picture fm1_idle_level, endless
+ * (the frame wraps at FM1_IDLE_FRAMES): a key or a button down ends it before its frame is drawn (the LEDs as the
+ * last frame left them, for the UI to take over), so does fm1_led_anim_stop (the main loop: a knob turned, the
+ * transport started) */
 static uint16_t fm1__an_f;
-static uint8_t fm1__an_glow, fm1__an_cb[FM1_NKEY], fm1__an_acc[FM1_NKEY];   /* each LED: column << 3 | row, its sigma-delta */
+static uint8_t fm1__an_glow, fm1__an_idle, fm1__an_cb[FM1_NKEY], fm1__an_acc[FM1_NKEY];   /* each LED: column << 3 | row,
+                                                                                            * its sigma-delta */
 static __attribute__((noinline)) void fm1__anim_frame(void)
 {
-    uint32_t f = fm1__an_f - 1u, i;
+    uint32_t f = fm1__an_f - 1u, i, idle = fm1__an_idle;
     uint8_t l[FM1_NCOL] = {0}, d[FM1_NCOL] = {0};
-    if (fm1_in.notes | fm1_in.buttons)            /* a key or a button down: done, the UI's at once */
+    if (fm1_in.notes | fm1_in.buttons) {          /* a key or a button down: done, the UI's at once */
+        if (idle) {
+            fm1__an_f = 0;
+            return;
+        }
         f = FM1_ANIM_FRAMES;
+    }
     for (i = 0; i < FM1_NKEY; i++) {
-        uint32_t q = fm1_anim_level(f, i, fm1__an_glow), cb = fm1__an_cb[i], a = fm1__an_acc[i] + (q & 0x7Fu);
+        uint32_t q = idle ? fm1_idle_level(f, i, fm1__an_glow) : fm1_anim_level(f, i, fm1__an_glow);
+        uint32_t cb = fm1__an_cb[i], a = fm1__an_acc[i] + (q & 0x7Fu);
         uint32_t m = 1u << (cb & 7u);
         if (a >= FM1_ANIM_FULL) {                  /* lit frames: q of 64, a first order sigma-delta each */
             a -= FM1_ANIM_FULL;
@@ -473,15 +484,19 @@ static __attribute__((noinline)) void fm1__anim_frame(void)
             d[cb >> 3] |= (uint8_t)m;
         fm1__an_acc[i] = (uint8_t)a;
     }
+    if (idle)                                      /* (endless: the frame wraps) */
+        f = (f + 1u) & (FM1_IDLE_FRAMES - 1u);
     for (i = 0; i < FM1_NCOL; i++) {
         fm1_led_dim[i] = d[i];
-        fm1_led[i] = f >= FM1_ANIM_FRAMES ? 0u : l[i];
+        fm1_led[i] = !idle && f >= FM1_ANIM_FRAMES ? 0u : l[i];
     }
-    fm1__an_f = (uint16_t)(f >= FM1_ANIM_FRAMES ? 0u : f + 2u);   /* (the last picture stays for the UI to take over) */
+    fm1__an_f = (uint16_t)(idle ? f + 1u : f >= FM1_ANIM_FRAMES ? 0u : f + 2u);   /* (the sweep's last picture stays for
+                                                                                   * the UI to take over) */
     fm1__led_lines(FM1__LIT(0u));                  /* column 0, lit a moment ago with the last frame's: this one's */
 }
-/* start the sweep (main loop, before the scan runs or with it): `glow` the idle glow is on (MENU > LEDS DIM HI / LO) */
-static void fm1_led_anim_start(uint32_t glow)
+/* start the sweep (main loop, before the scan runs or with it): `glow` the idle glow is on (MENU > LEDS DIM HI / LO);
+ * idle: the idle animation (fm1_led_idle_start) */
+static void fm1__anim_begin(uint32_t glow, uint32_t idle)
 {
     uint32_t i, r, c;
     for (i = 0; i < FM1_NKEY; i++)
@@ -494,9 +509,16 @@ static void fm1_led_anim_start(uint32_t glow)
     for (c = 0; c < FM1_NCOL; c++)
         fm1_led[c] = fm1_led_dim[c] = fm1_led_breath[c] = fm1_led_mid[c] = 0;
     fm1__an_glow = glow != 0u;
+    fm1__an_idle = idle != 0u;
     fm1__an_f = 1;
 }
+static void fm1_led_anim_start(uint32_t glow) { fm1__anim_begin(glow, 0); }
 static int fm1_led_anim_on(void) { return fm1__an_f != 0u; }
+/* 1.2: the idle animation (main loop): it has the LEDs as the sweep does (fm1_led_anim_on) until a key or a button
+ * goes down or fm1_led_anim_stop. One core: the scan's frame runs whole before or after these */
+static void fm1_led_idle_start(uint32_t glow) { fm1__anim_begin(glow, 1); }
+static int fm1_led_idle_on(void) { return fm1__an_f != 0u && fm1__an_idle; }
+static void fm1_led_anim_stop(void) { fm1__an_f = 0; }   /* (the LEDs as the last frame left them: the UI writes them) */
 static void fm1_input_tick(void)
 {
     uint32_t p = fm1__tick_col, n = p + 1u == FM1_NCOL ? 0u : p + 1u;
