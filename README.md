@@ -9,6 +9,10 @@ Named after its first user, Felucca; it is not tied to that application.
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi. Product and company names
 belong to their owners.
 
+> **Licence notes before you start**
+> - A fork of Felucca cannot move to MPL-2.0 by using this repository. To use another licence, start a new project and import this one: [Forks of Felucca](LICENSING.md#forks-of-felucca).
+> - `chip/usb.c` is GPL-3.0-only. A firmware that includes it is GPL-3.0 as a whole: [`usb.c`](LICENSING.md#chipusbc).
+
 > Status: early. Split out of [Felucca](https://github.com/hugelton/Felucca). It cannot be
 > built on its own yet. Expect changes to file names and layout.
 
@@ -46,8 +50,7 @@ when its 48 kHz audio option is on.
 [MPL-2.0](LICENSE), applied per file: if you change a file from this repository and
 distribute it, you publish your change to that file. Your own code on top of it may use any
 licence. This repository can be combined with GPL code (no "Incompatible With Secondary
-Licences" notice). A fork of Felucca stays GPL; to use another licence,
-start a new project on top of this one ([details](LICENSING.md#forks-of-felucca)). Credits, including the JieLi SDK (Apache-2.0), are in [NOTICE](NOTICE).
+Licences" notice). See the notes at the top. Credits, including the JieLi SDK (Apache-2.0), are in [NOTICE](NOTICE).
 
 ## Firmware that uses this base
 
