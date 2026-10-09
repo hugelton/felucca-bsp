@@ -29,3 +29,9 @@ when this repository carries the same file under MPL-2.0; only the copy taken fr
 To publish under MPL-2.0 (or any other licence), start a new project, import this repository, and write the rest
 yourself. Do not copy Felucca's code into it, and leave out `chip/usb.c` (see above). The other direction is fine: MPL-2.0 files from here can go into a
 GPL project.
+
+## Tools
+
+`tools/fm1pkg.py` (package builder) and `tools/fm1_install.py` (USB-MIDI installer) are MPL-2.0, moved here from Felucca
+by their only author. Packages built by `fm1pkg.py` contain three files of the JieLi AC79 SDK (`uboot.boot`,
+`cfg_tool.bin`, `eq_cfg_hw.bin`), which are Apache-2.0: ship `LICENSES/Apache-2.0.txt` with every package.

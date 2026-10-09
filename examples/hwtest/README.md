@@ -26,11 +26,12 @@ About 9 KB. The toolchain is JieLi's own (see Felucca's `tools/get_toolchain.sh`
 
 ## Install
 
-This repository has no packer yet. Use Felucca's tools (GPL-3.0, outside this repository) with a loader built
-from `loader/`:
+Build the loader (`loader/`, see the README), then pack and install with the tools in this repository:
 
-    python3 tools/fm1pkg_make.py hwtest.bin loader.bin hwtest.fwsc --product FM-1_9T0
-    python3 tools/fm1_install.py hwtest.fwsc
+    AC79_SDK=/path/to/ac79-sdk python3 tools/fm1pkg.py hwtest.bin loader.bin hwtest.fwsc --product FM-1_9T0
+    python3 tools/fm1_install.py hwtest.fwsc          # needs mido and python-rtmidi
+
+`fm1pkg.py` takes three small files from the JieLi AC79 SDK (Apache-2.0) and puts them in the package.
 
 ## Status
 
