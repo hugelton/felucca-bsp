@@ -14,15 +14,20 @@
  * Two boots in a row that never reach the main loop's "healthy" point drop into UBOOT, so a
  * broken build can always be replaced. Includes usb.c, so the image is GPL-3.0 as a whole. */
 #include <stdint.h>
+#ifndef HWTEST_EXPERIMENTAL
+#define HWTEST_EXPERIMENTAL 0     /* 1: also the experimental parts (second core, a deliberate crash): hwtest-exp */
+#endif
 #define FELUCCA_CDC 1
 #define FELUCCA_OTA 0
-#define FELUCCA_ID "felucca-bsp hwtest"
+#define FELUCCA_ID (HWTEST_EXPERIMENTAL ? "felucca-bsp hwtest-exp" : "felucca-bsp hwtest")
 #define RING_PUBLISH() __asm__ volatile("" ::: "memory")
 #include "fm1_time.h"
 #include "fm1_sys.h"
 #include "fm1_irq.h"
 #include "fm1_guard.h"
+#if HWTEST_EXPERIMENTAL
 #include "fm1_cpu1.h"
+#endif
 #include "fm1_timer.h"
 #include "fm1_input.h"
 #include "fm1_adc.h"
@@ -33,6 +38,7 @@
 extern uint32_t _data_start[], _data_end[], _data_load[], _bss_start[], _bss_end[];
 
 static volatile uint32_t ms;
+#if HWTEST_EXPERIMENTAL
 static volatile uint32_t cpu1_count;               /* counted by CPU1 once started ('k') */
 static uint8_t cpu1_started;
 void fm1_cpu1_main(void)                            /* runs on the second core: polled, no interrupts */
@@ -41,6 +47,7 @@ void fm1_cpu1_main(void)                            /* runs on the second core: 
     for (;;)
         cpu1_count++;
 }
+#endif
 static uint32_t boots_ok;
 static struct { uint32_t magic, pending, failed; } guard __attribute__((section(".noinit")));
 void fm1_alnk0_irq(void) {}                     /* isr_alnk0 is linked but no audio runs */
@@ -201,8 +208,10 @@ static void status(int32_t knob, int32_t batt)
         putd("", (uint32_t)enc_pos[i]);
     }
     putd("usb_cfg=", usb.config);
+#if HWTEST_EXPERIMENTAL
     if (cpu1_started)
         putd("cpu1=", cpu1_count);
+#endif
     puts_("\r\n");
 }
 
@@ -210,7 +219,8 @@ static void command(char c, int32_t knob, int32_t batt)
 {
     switch (c) {
     case 'h':
-        puts_("h help, p print, c last crash, k start CPU1, x crash on purpose, w LED walk, u UBOOT, r reboot\r\n");
+        puts_(HWTEST_EXPERIMENTAL ? "h help, p print, c last crash, w LED walk, u UBOOT, r reboot, k start CPU1, x crash on purpose\r\n"
+                                  : "h help, p print, c last crash, w LED walk, u UBOOT, r reboot\r\n");
         break;
     case 'p':
         status(knob, batt);
@@ -225,6 +235,7 @@ static void command(char c, int32_t knob, int32_t batt)
         puthex("dbg=", fm1_crash.dbg); puthex("sp=", fm1_crash.sp);
         puts_("\r\n");
         break;
+#if HWTEST_EXPERIMENTAL
     case 'k':                                   /* start the second core (experimental) */
         if (cpu1_started) {
             puts_("cpu1 already started\r\n");
@@ -240,6 +251,7 @@ static void command(char c, int32_t knob, int32_t batt)
         fm1_delay_ms(30);
         *(volatile uint32_t *)0 = 1;
         break;
+#endif
     case 'w':
         walk_until = ms + 41u * 60u;
         break;

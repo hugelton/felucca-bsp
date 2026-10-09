@@ -9,6 +9,11 @@ Named after its first user, Felucca; it is not tied to that application.
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi. Product and company names
 belong to their owners.
 
+> **Experimental parts.** Some features here are **beta**: the second core (`chip/fm1_cpu1.*`) and expanded flash
+> (`chip/fm1_flash_ext.h`). Others are only a **concept** that does not run: BLE, USB host, a higher clock. None has run
+> on a device yet. What is established and what is not: [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md). The safe test
+> firmware (`examples/hwtest/hwtest.bin`) contains none of them.
+
 > **Work in progress: moving out of Felucca, licences under review**
 > This code is being moved here from Felucca. The MPL-2.0 headers describe the intended licence; they are not final
 > until every contributor whose code touches these files has been asked and has answered. Until then, treat the
@@ -46,7 +51,7 @@ when they have been checked on a real unit.
 | `examples/hwtest-ble/` | **Concept, does not run.** Glue between `ble/` and JieLi's radio controller, and a survey of what linking it needs; no firmware ([README](examples/hwtest-ble/README.md)) |
 | `docs/EXPERIMENTAL.md` | Second core, expanded flash, USB host, BLE, clock: what is established and what is not |
 | `tools/` | Package builder (`fm1pkg.py`) and USB-MIDI installer (`fm1_install.py`) |
-| `examples/hwtest/` | A small firmware that exercises the screen, knob, buttons, LEDs and USB serial on a real FM-1 |
+| `examples/hwtest/` | Test firmware for a real FM-1: screen, knob, buttons, LEDs, USB serial. `hwtest.bin` is the safe image; `hwtest-exp.bin` adds the experimental parts |
 | `examples/felucca/` | Reference only: `ota_hw.c`, the hooks Felucca gives `ota.c`. Not built here |
 
 Headers include each other by file name. Build with `-Ichip -Iboards/fm1`. The loader builds from this tree with
