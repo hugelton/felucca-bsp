@@ -18,6 +18,7 @@ SECTIONS
     .bss (NOLOAD) : { _bss_start = .; *(.bss*) *(.sbss*) *(COMMON) . = ALIGN(4); _bss_end = .; } > RAM
     .noinit (NOLOAD) : { *(.noinit*) } > NOINIT
     _rt_start = 0; _rt_end = 0;
+    _cpu1_sstack_top = 0x01C71000; _cpu1_ustack_top = 0x01C71300;   /* the second core's stacks (fm1_cpu1.h): 4 KiB + 768 B */
     _guard0 = 0x01C74000; _ustack_lo = 0x01C74100; _ustack_top = 0x01C7A000;
     _guard1 = 0x01C7A000; _sstack_lo = 0x01C7A100; _sstack_top = 0x01C7C000;
     /DISCARD/ : { *(.comment) *(.note*) }

@@ -9,7 +9,7 @@
  *   LEDs     a walk over all 41 LEDs at power-on, then each key lights its own
  *   USB      CDC serial "debug port" (115200 8N1, the rate is ignored): a status line every 250 ms
  *            and one-letter commands: h help, p print now, c last crash, x crash on purpose, w LED walk,
- *            u UBOOT (flash mode), r reboot
+ *            k start the second core (experimental, 'cpu1=' then counts in the status line), u UBOOT, r reboot
  *
  * Two boots in a row that never reach the main loop's "healthy" point drop into UBOOT, so a
  * broken build can always be replaced. Includes usb.c, so the image is GPL-3.0 as a whole. */
@@ -22,6 +22,7 @@
 #include "fm1_sys.h"
 #include "fm1_irq.h"
 #include "fm1_guard.h"
+#include "fm1_cpu1.h"
 #include "fm1_timer.h"
 #include "fm1_input.h"
 #include "fm1_adc.h"
@@ -32,6 +33,14 @@
 extern uint32_t _data_start[], _data_end[], _data_load[], _bss_start[], _bss_end[];
 
 static volatile uint32_t ms;
+static volatile uint32_t cpu1_count;               /* counted by CPU1 once started ('k') */
+static uint8_t cpu1_started;
+void fm1_cpu1_main(void)                            /* runs on the second core: polled, no interrupts */
+{
+    fm1_cpu1_ready();
+    for (;;)
+        cpu1_count++;
+}
 static uint32_t boots_ok;
 static struct { uint32_t magic, pending, failed; } guard __attribute__((section(".noinit")));
 void fm1_alnk0_irq(void) {}                     /* isr_alnk0 is linked but no audio runs */
@@ -192,6 +201,8 @@ static void status(int32_t knob, int32_t batt)
         putd("", (uint32_t)enc_pos[i]);
     }
     putd("usb_cfg=", usb.config);
+    if (cpu1_started)
+        putd("cpu1=", cpu1_count);
     puts_("\r\n");
 }
 
@@ -199,7 +210,7 @@ static void command(char c, int32_t knob, int32_t batt)
 {
     switch (c) {
     case 'h':
-        puts_("h help, p print, c last crash, x crash on purpose, w LED walk, u UBOOT, r reboot\r\n");
+        puts_("h help, p print, c last crash, k start CPU1, x crash on purpose, w LED walk, u UBOOT, r reboot\r\n");
         break;
     case 'p':
         status(knob, batt);
@@ -213,6 +224,16 @@ static void command(char c, int32_t knob, int32_t batt)
         puthex("pc=", fm1_crash.pc); puthex("rets=", fm1_crash.rets); puthex("emu=", fm1_crash.emu);
         puthex("dbg=", fm1_crash.dbg); puthex("sp=", fm1_crash.sp);
         puts_("\r\n");
+        break;
+    case 'k':                                   /* start the second core (experimental) */
+        if (cpu1_started) {
+            puts_("cpu1 already started\r\n");
+            break;
+        }
+        fm1_guard_unlock_top();
+        cpu1_started = fm1_cpu1_start(100) == 0;
+        fm1_guard_lock_top();
+        puts_(cpu1_started ? "cpu1 up\r\n" : "cpu1 did not report in\r\n");
         break;
     case 'x':                                   /* test the guards: write to the NULL page */
         puts_("crashing\r\n");

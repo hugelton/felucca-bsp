@@ -12,9 +12,10 @@ CC="$TC/pi32v2/bin/clang -target pi32v2"
 $CC -c "$ROOT/chip/crt0.S" -o "$OUT/crt0.o"
 $CC -c "$ROOT/chip/fm1_vec.S" -o "$OUT/vec.o"
 $CC -c "$ROOT/chip/fm1_isr.S" -o "$OUT/isr.o"
+$CC -c "$ROOT/chip/fm1_cpu1.S" -o "$OUT/cpu1.o"
 $CC -Os -ffunction-sections -fno-builtin -Wall -Wno-unused-function \
     -I"$ROOT/chip" -I"$ROOT/boards/fm1" -c "$HERE/hwtest.c" -o "$OUT/hwtest.o"
-"$TC/pi32v2/bin/ld" -T "$HERE/app.ld" "$OUT/crt0.o" "$OUT/vec.o" "$OUT/isr.o" "$OUT/hwtest.o" -o "$OUT/hwtest.elf"
+"$TC/pi32v2/bin/ld" -T "$HERE/app.ld" "$OUT/crt0.o" "$OUT/vec.o" "$OUT/isr.o" "$OUT/cpu1.o" "$OUT/hwtest.o" -o "$OUT/hwtest.elf"
 "$TC/common/bin/objcopy" -O binary -j .text "$OUT/hwtest.elf" "$OUT/text.bin"
 "$TC/common/bin/objcopy" -O binary -j .data "$OUT/hwtest.elf" "$OUT/data.bin"
 # .data follows .text at its load address
