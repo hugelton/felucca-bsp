@@ -46,7 +46,8 @@ when its 48 kHz audio option is on.
 [MPL-2.0](LICENSE), applied per file: if you change a file from this repository and
 distribute it, you publish your change to that file. Your own code on top of it may use any
 licence. This repository can be combined with GPL code (no "Incompatible With Secondary
-Licences" notice). Credits, including the JieLi SDK (Apache-2.0), are in [NOTICE](NOTICE).
+Licences" notice). A fork of Felucca stays GPL; to use another licence,
+start a new project on top of this one ([details](LICENSING.md#forks-of-felucca)). Credits, including the JieLi SDK (Apache-2.0), are in [NOTICE](NOTICE).
 
 ## Firmware that uses this base
 
