@@ -12,7 +12,9 @@ package header. No vendor code is intended to be included.
 Switching the divide-by-zero trap off in chip/fm1_irq.h follows a fix proposed by Steve Pinkham
 (spinkham) for Felucca (pull request 111). The code and the comment here are written independently.
 
-chip/usb.c is included as it is in Felucca (GPL-3.0-only); only the include path of one header was changed.
+chip/usb.c comes from Felucca, where it is GPL-3.0-only; only the include path of one header was changed. Here it
+is MPL-2.0: its MIDI clock and transport sync is keremimo's (Felucca commit 019e2ad), licensed under MPL-2.0 by
+agreement: https://github.com/hugelton/felucca-bsp/pull/3
 
 The history of these files comes from Felucca (https://github.com/hugelton/Felucca), where
 they were first published under GPL-3.0-only by the same copyright holder. Each commit

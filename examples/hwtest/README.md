@@ -47,5 +47,4 @@ LED walk; if nothing appears, reset twice and the device enters UBOOT.
 
 ## Licence
 
-The sources are MPL-2.0, but the image includes `chip/usb.c` (GPL-3.0-only), so a built firmware is
-GPL-3.0 as a whole.
+MPL-2.0, like the rest of the repository.

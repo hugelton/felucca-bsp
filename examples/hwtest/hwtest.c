@@ -12,7 +12,7 @@
  *            k start the second core (experimental, 'cpu1=' then counts in the status line), u UBOOT, r reboot
  *
  * Two boots in a row that never reach the main loop's "healthy" point drop into UBOOT, so a
- * broken build can always be replaced. Includes usb.c, so the image is GPL-3.0 as a whole. */
+ * broken build can always be replaced. */
 #include <stdint.h>
 #ifndef HWTEST_EXPERIMENTAL
 #define HWTEST_EXPERIMENTAL 0     /* 1: also the experimental parts (second core, a deliberate crash): hwtest-exp */

@@ -22,7 +22,6 @@ belong to their owners.
 
 > **Licence notes before you start**
 > - A fork of Felucca cannot move to MPL-2.0 by using this repository. To use another licence, start a new project and import this one: [Forks of Felucca](LICENSING.md#forks-of-felucca).
-> - `chip/usb.c` is GPL-3.0-only. A firmware that includes it is GPL-3.0 as a whole: [`usb.c`](LICENSING.md#chipusbc).
 
 > Status: early. Split out of [Felucca](https://github.com/hugelton/Felucca). It cannot be
 > built on its own yet. Expect changes to file names and layout.
@@ -44,7 +43,7 @@ when they have been checked on a real unit.
 | Path | What |
 | --- | --- |
 | `chip/` | Registers, drivers and boot entry shared by the chip family; `libc.c` (the few routines a freestanding build needs); `ota.c` (the update session, which takes its hooks from the application) |
-| `chip/usb.c` | The USB device: MIDI, serial and audio classes with the EP0 and poll code. **GPL-3.0-only**, see Licence |
+| `chip/usb.c` | The USB device: MIDI, serial and audio classes with the EP0 and poll code |
 | `loader/` | The update loader (builds as a RAM image; it includes `chip/usb.c`, `chip/ota.c` and `chip/libc.c`) |
 | `boards/fm1/` | FM-1 wiring and drivers: LCD pins, key scan, ADC channels, audio codec lines |
 | `ble/` | **Concept, does not run yet.** A minimal BLE-MIDI sender over standard HCI; tested on a PC against a fake controller only ([ble/README.md](ble/README.md)) |
