@@ -1,0 +1,15 @@
+name: USB host tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  usb-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: USB host, audio coexistence, device-only and loader tests
+        env:
+          CC: clang
+        run: tests/run_usb_host_tests.sh

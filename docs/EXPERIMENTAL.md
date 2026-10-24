@@ -1,8 +1,10 @@
 # Experimental features
 
-Status of the advanced features planned for this repository. **Beta**: the second core (runs in Melodee; this version not yet on a device) and expanded flash (code exists, never run on a device). **Concept**: USB host, the clock (nothing runs). Each item says what is
-established, what is guessed, and what the first bench test is. All of it stays behind explicit calls: no firmware
-starts any of it by itself.
+Status of the advanced features planned for this repository. **Beta**: the second core (runs in Melodee;
+this version not yet on a device), expanded flash (code exists, never run on a device), and USB MIDI host
+(input runs in Melodee; this BSP port and output need device validation). **Concept**: the clock (nothing runs).
+Each item says what is established, what is guessed, and what the first bench test is. All of it stays behind
+explicit calls: no firmware starts any of it by itself.
 
 ## Second core (CPU1): `chip/fm1_cpu1.h`, `chip/fm1_cpu1.S`, `chip/fm1_cpu1_stop.h`
 
@@ -27,9 +29,15 @@ JEDEC id of a swapped part and check that the stock layout still boots.
 
 ## USB host
 
-The USB0 core has host-mode functions in the SDK (`usb_h_sie_init`, `usb_h_chirp_and_reset`, `usb_h_ep_read/write`
-in `cpu.a`), on the same controller `chip/usb.c` drives as a device. Not started. Unknown and possibly blocking: the
-FM-1's USB-C port may not be able to supply 5 V (VBUS) or to switch to host at all. First step: look at the board.
+`chip/usb_host.c` and `chip/usb_host_desc.h` port Melodee's USB MIDI host under MPL-2.0,
+with permission from Adrien Tibi (Recursive Field Instruments) and Kerem Kilic (Ellic Studio).
+Full-speed MIDI 1.0 input and output work directly or behind one powered hub in the SIE/bus
+model, including ACK ownership, retries and recovery. Adrien and Melodee's maintainer report
+physical input use on FM-1 hardware. This BSP adaptation and the later OUT path have not been
+validated on hardware. The host PHY never supplies VBUS: use external power.
+
+Opt-in only (`FELUCCA_USB_HOST=1`); every boot starts as a device. Update loaders force it off.
+Integration, API, supported devices and first bench checks: [USB_HOST.md](USB_HOST.md).
 
 ## Bluetooth
 

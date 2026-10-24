@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MPL-2.0
- * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio)
+ * Portions Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
  * MIDI clock and transport sync: keremimo (Felucca 019e2ad), under MPL-2.0 by agreement: https://github.com/hugelton/felucca-bsp/pull/3 */
 /* USB full-speed device on USB0: a
  * class-compliant USB-MIDI interface. All SIE traffic happens in one place,
@@ -26,8 +27,17 @@
  * FELUCCA_UAC_OUT=1 (with FELUCCA_UAC) adds a USB audio output too: the computer plays through the FM-1 (16-bit
  * stereo, 44.1 kHz, EP4 OUT isochronous adaptive). uac_service takes each packet into a ring (nested in the render
  * too); uac_play, after each render, adds it to the output, resampled to the I2S clock (~44,117.6 Hz): the ring's
- * fill steers the rate, so it neither runs dry nor overflows. */
+ * fill steers the rate, so it neither runs dry nor overflows.
+ * FELUCCA_USB_HOST=1 adds opt-in MIDI host mode; see docs/USB_HOST.md for the main-loop contract. */
 #include "fm1_usb.h"   /* registers (chip/) */
+/* Host is opt-in and excluded from update loaders, even with a global build flag. */
+#ifndef FELUCCA_USB_HOST
+#define FELUCCA_USB_HOST 0
+#endif
+#ifdef FELUCCA_LOADER
+#undef FELUCCA_USB_HOST
+#define FELUCCA_USB_HOST 0
+#endif
 #ifndef FELUCCA_CDC
 #define FELUCCA_CDC 0
 #endif
@@ -235,6 +245,9 @@ static uint32_t midi_in_ms[MQ];
 static uint8_t midi_in_source[MQ];                    /* 1 USB, 2 TRS */
 static volatile uint32_t fm1_ms;                    /* also declared by core.h; parser-only host tests */
 static volatile uint32_t mi_w, mi_r, mo_w, mo_r;
+static volatile uint8_t midi_usb_lost;                  /* consume in the app: release USB input owners */
+static uint32_t usb_retry_ms;
+static int usb_midi_out_ready(void);
 static volatile uint8_t midi_in_overflow;               /* audio ISR discards a broken stream and releases notes */
 
 static int midi_enqueue(uint32_t pkt, uint32_t source)
@@ -254,19 +267,22 @@ static int midi_enqueue(uint32_t pkt, uint32_t source)
     return 1;
 }
 
-static void midi_out_event(uint32_t pkt)            /* from the audio ISR */
+/* Returns 0 when disconnected or full; the application retains responsibility for unsent releases. */
+static int midi_out_try(uint32_t pkt)                /* from the audio ISR */
 {
-    if (usb.config && mo_w - mo_r < MQ) {
-        midi_out_q[mo_w % MQ] = pkt;
-        RING_PUBLISH();
-        mo_w++;
-    }
+    if (!usb_midi_out_ready() || mo_w - mo_r >= MQ)
+        return 0;
+    midi_out_q[mo_w % MQ] = pkt;
+    RING_PUBLISH();
+    mo_w++;
+    return 1;
 }
+static void midi_out_event(uint32_t pkt) { (void)midi_out_try(pkt); }
 static volatile uint32_t midi_links;                /* counts up at each new connection (SET_CONFIGURATION 1) */
 static uint32_t midi_out_link(void) { return midi_links; }
 static uint32_t midi_out_room(void)                  /* free slots in the out ring (0: no host) */
 {
-    return usb.config ? MQ - (mo_w - mo_r) : 0u;
+    return usb_midi_out_ready() ? MQ - (mo_w - mo_r) : 0u;
 }
 
 /* ------------------------------------------------------- descriptors --- */
@@ -997,6 +1013,16 @@ static int ep1_take(const uint8_t *b, uint32_t n)
     return 1;
 }
 
+#include "usb_host.c"
+
+static int usb_midi_out_ready(void)
+{
+#if FELUCCA_USB_HOST
+    if (uh.on) return uh.run && uh.out_mps;
+#endif
+    return usb.config;
+}
+
 static void ep1_rx(void)                                /* leaves the packet (NAK) while the ring is too full */
 {
     uint32_t csr, n;
@@ -1495,6 +1521,12 @@ static void uac_service(void)
 static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
 {
     uint32_t iu, it, ir;
+#if FELUCCA_USB_HOST
+    if (uh.on) {
+        if (uh.run) uh_poll();
+        return;
+    }
+#endif
     if (!usb.up)
         return;
     if (fm1_usb_sof_take()) {                           /* SOF pending: NOT a reliable "host is there" */
@@ -1614,10 +1646,13 @@ static void usb_start(void)                             /* boot, or main-loop re
  * later still enumerates. */
 static void usb_retry(uint32_t now_ms)
 {
-    static uint32_t t;
-    if (usb.up || usb.detached || now_ms - t < 1000u)
+#if FELUCCA_USB_HOST
+    if (uh.on)
         return;
-    t = now_ms;
+#endif
+    if (usb.up || usb.detached || now_ms - usb_retry_ms < 1000u)
+        return;
+    usb_retry_ms = now_ms;
     usb.retries++;
     usb_start();
 }
@@ -1626,6 +1661,10 @@ static void usb_detach(void)
 {
     usb.detached = 1;
     usb.up = 0;
+#if FELUCCA_USB_HOST
+    if (uh.on) uh_session_end();
+    uh.want = uh.on = 0;
+#endif
     fm1_usb_off();
 }
 

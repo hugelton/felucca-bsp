@@ -21,6 +21,16 @@ the MIDI clock and transport sync by keremimo (Felucca commit 019e2ad, through F
 agreed to license it, and the TRS ring fix 57f2aa0, under MPL-2.0: https://github.com/hugelton/felucca-bsp/pull/3. Firmwares and loader images built
 from this tree no longer become GPL-3.0 through it. Felucca's own copy of `usb.c` stays GPL-3.0-only (see below).
 
+## USB MIDI host
+
+`chip/usb_host.c`, `chip/usb_host_desc.h`, the host routines in `chip/fm1_usb.h` and
+`tests/usb_host_test.c` are ported from Melodee under MPL-2.0. Adrien Tibi
+(Recursive Field Instruments / recursivefieldinstruments) confirmed permission in
+[Melodee #75](https://github.com/keremimo/melodee/pull/75#issuecomment-6384184014).
+Kerem Kilic (Ellic Studio) also licenses his output, recovery, tests and BSP integration
+under MPL-2.0. Both authors are credited in the files; exact source revisions are in
+`NOTICE`. This permission applies to these contributions, not to the rest of Melodee.
+
 ## Forks of Felucca
 
 Using this repository does not relicense a fork of Felucca. A fork still contains Felucca's code, which is

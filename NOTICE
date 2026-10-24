@@ -29,3 +29,19 @@ message names the Felucca commit it was taken from. Releases of Felucca that alr
 contain these files stay under GPL-3.0-only.
 
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi.
+
+USB MIDI host (chip/usb_host.c, chip/usb_host_desc.h, the host additions in chip/fm1_usb.h,
+and tests/usb_host_test.c): Copyright (C) 2026 Adrien Tibi (Recursive Field Instruments,
+recursivefieldinstruments) and Kerem Kilic (Ellic Studio, keremimo). Ported from
+https://github.com/keremimo/melodee at e9eab97a5bd93c7e2f38bca7aae5006e59f21148, specifically:
+- 0d705bf43a74dd53f244cfacf3eea2bd0b978289: Adrien's enumeration, hub handling, input,
+  PHY setup, descriptor parser and SIE/bus tests.
+- 198c8fd4383a19fa8d53f8db988babfffe366b2e: Adrien's input-toggle and retry fixes.
+- b4380f9474e18d1437f33ad84459c86a8458e815: Kerem's MIDI output, endpoint validation, ACK ownership and recovery tests.
+- eb57309540ee5a9f92e9b5188ac3ace478fa34db: Kerem's disconnect debounce.
+Adrien agreed to MPL licensing for his contributions in response to the MPL request:
+https://github.com/keremimo/melodee/pull/75#issuecomment-6384184014
+Kerem licenses his contributions to this port under MPL-2.0 as well. The original
+Melodee copies remain GPL-3.0-only. chip/usb.c retains Felucca's device code, with new
+MPL-2.0 integration by Kerem Kilic. The host's register sequences follow the public
+AC79 SDK; no SDK implementation source is copied into this port.

@@ -10,15 +10,17 @@ Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi. Product and comp
 belong to their owners.
 
 > **Experimental parts.** Some features here are **beta**: the second core (`chip/fm1_cpu1.*`) and expanded flash
-> (`chip/fm1_flash_ext.h`). Others are only a **concept** that does not run: USB host, a higher clock. None has run
-> on a device yet. What is established and what is not: [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md). The safe test
+> (`chip/fm1_flash_ext.h`). USB MIDI host is ported from Melodee, where input has run on hardware;
+> this BSP port and its OUT path still need device validation. A higher clock remains a **concept**.
+> What is established and what is not: [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md). The safe test
 > firmware (`examples/hwtest/hwtest.bin`) contains none of them. Bluetooth MIDI and WiFi, on JieLi's own
 > radio libraries, are in [fm1-base](https://github.com/charlesvestal/fm1-base), which builds on this repository.
 
 > **Licences: settled.** The files here are MPL-2.0. Leo Kuroshita confirmed it for the Felucca code he owns
 > ([#4](https://github.com/hugelton/felucca-bsp/issues/4)), and keremimo for his part of `chip/usb.c`
 > ([#3](https://github.com/hugelton/felucca-bsp/pull/3)). Details in [LICENSING.md](LICENSING.md) and
-> [NOTICE](NOTICE).
+> [NOTICE](NOTICE). The USB host port also has permission from Adrien Tibi (Recursive Field Instruments):
+> [Melodee #75](https://github.com/keremimo/melodee/pull/75#issuecomment-6384184014).
 
 > **Licence notes before you start**
 > - A fork of Felucca cannot move to MPL-2.0 by using this repository. To use another licence, start a new project and import this one: [Forks of Felucca](LICENSING.md#forks-of-felucca).
@@ -45,6 +47,7 @@ when they have been checked on a real unit.
 | Path | What |
 | --- | --- |
 | `chip/` | Registers, drivers and boot entry shared by the chip family; `libc.c` (the few routines a freestanding build needs); `ota.c` (the update session, which takes its hooks from the application); `fm1_perf.h` (cycle and stall counters) and `fm1_debug.h` (register access for development builds) |
+| `chip/usb_host.c`, `chip/usb_host_desc.h` | Opt-in USB MIDI host: direct or one powered hub, MIDI input/output; [API and limits](docs/USB_HOST.md) |
 | `chip/usb.c` | The USB device: MIDI, serial and audio classes (audio in, and with `FELUCCA_UAC_OUT` audio out) with the EP0 and poll code |
 | `chip/fm1_sys.h`, `chip/fm1_guard.h` | Supply rails (VDC14 and SYSVDD at M-VAVE's levels), reboot and core reset; hardware guards (stack, write and fetch limits that end in the fault report), the stack floor, whether code runs in an interrupt |
 | `loader/` | The update loader (builds as a RAM image; it includes `chip/usb.c`, `chip/ota.c` and `chip/libc.c`) |
