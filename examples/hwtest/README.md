@@ -17,6 +17,11 @@ Small FM-1 firmware that exercises this repository on real hardware. It is a tes
 | USB | CDC serial, 115200 8N1 (the rate is ignored). A status line every 250 ms. The update entry (M-UPGRADE over USB-MIDI): the installer replaces hwtest, and a bar across the bottom of the screen shows the steps. |
 | Corner | Bottom right: red = USB not configured, blinking green = configured. Yellow bottom: the last run crashed. |
 
+Panel initialization and rectangle transfers use the reusable board driver
+`boards/fm1/fm1_lcd.h`. The example contains only its colours and layout.
+See [board I/O contracts](../../docs/BOARD_IO.md) for image transfers and the
+audio API (hwtest does not enable audio).
+
 Serial commands (both images): `h` help, `p` print now, `c` last crash, `w` LED walk, `u` UBOOT, `r` reboot.
 The SysEx soft key (UBOOT) works too. Only in `hwtest-exp`: `k` start the second core (each `p` then hands it a thousand jobs: `cpu1=` counts them, `late=`
 the ones not back in time, `gave_up=` why it was retired, `rejected=` its misreads, `stack=` its depth),
