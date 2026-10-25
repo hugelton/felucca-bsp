@@ -11,6 +11,7 @@
 #pragma once
 #include <stdint.h>
 #include "fm1_cc.h"
+#include "fm1_flash_access.h"
 
 FM1_INLINE void fm1_cpu1_stop(void)
 {
@@ -32,5 +33,6 @@ FM1_INLINE void fm1_cpu1_stop(void)
     *(volatile uint32_t *)0x1EEE340u = en;
     if (locked && (*(volatile uint32_t *)0x1EEE240u & 1u))
         *(volatile uint32_t *)0x1EEE240u = 0xE7u;
+    fm1_flash_cpu1_idle = 0;
     __asm__ volatile("csync" ::: "memory");
 }

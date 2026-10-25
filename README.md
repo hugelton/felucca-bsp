@@ -55,6 +55,7 @@ when they have been checked on a real unit.
 | `boards/fm1/` | FM-1 wiring and drivers: LCD pins, key scan (with velocity and pressure from the keys, off by default: `fm1_input.h`), ADC channels, audio codec lines, the headphone jack's switch (PB5: `fm1_jack.h`) |
 | `boards/galaxia/` | Galaxia (a guitar pedal, board PD49 V03) wiring and drivers in one header, `gx_board.h`: the stereo converter on ALNK0 (44,118 Hz), six knobs including a nine-detent selector, two footswitches, the input jack detects, the two-colour LED |
 | `docs/EXPERIMENTAL.md` | Second core, expanded flash, USB host, clock: what is established and what is not |
+| `docs/FLASH.md` | Application write regions, flash API, interrupt preservation, CPU1 coordination and verification |
 | `docs/CPU.md` | What the CPU has been seen to do: 64-bit multiplies among 16-bit loads leave a register a bit off; keep them out of line |
 | `tools/` | Package builder (`fm1pkg.py`), USB-MIDI installer (`fm1_install.py`), `fm1_rescue` and `get_sdk.sh` (JieLi's SDK, fetched and checked by hash) |
 | `examples/hwtest/` | Test firmware for a real FM-1: screen, knob, buttons, LEDs, USB serial. `hwtest.bin` is the safe image; `hwtest-exp.bin` adds the experimental parts |
