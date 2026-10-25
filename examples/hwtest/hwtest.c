@@ -164,18 +164,7 @@ static int ota_prog(uint32_t off, const void *p, uint32_t n)
 }
 static int ota_fread(uint32_t off, void *p, uint32_t n)
 {
-    uint8_t *d = p;
-    while (n) {                                 /* 256-byte windows with interrupts off */
-        uint32_t k = n > 256u ? 256u : n, f = irq_save();
-        int rc = FL_FAR(fl_read_ram)(off, d, k);
-        irq_restore(f);
-        if (rc)
-            return rc;
-        off += k;
-        d += k;
-        n -= k;
-    }
-    return 0;
+    return fl_read(off, p, n);
 }
 static void ota_show(uint32_t step, int32_t code)   /* the steps as a bar across the bottom; red on a failure */
 {
@@ -384,9 +373,7 @@ static void app_main(void)
     int32_t knob = 0, batt = 0;
     uint32_t knob_w = ~0u, batt_w = ~0u;            /* the bars' widths on the screen (~0: not drawn yet) */
     {
-        uint32_t f = irq_save();
-        flash_ok = FL_FAR(fl_jedec_ram)() == 0x856014u;   /* the 1 MiB part every FM-1 has */
-        irq_restore(f);
+        flash_ok = fl_jedec() == 0x856014u;       /* the stock 1 MiB part */
         if (flash_ok)
             ota_boot_cleanup();                 /* what an interrupted update left behind */
     }
