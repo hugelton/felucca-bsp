@@ -335,6 +335,9 @@ static void fm1_delay_ms(uint32_t ms) { (void)ms; }
 #define HALF_FRAMES 128u
 static volatile uint32_t render_peak;
 static volatile uint8_t render_busy;
+static uint8_t sx_seen[8];                              /* FELUCCA_SYSEX_BYTE: the bytes the hook saw */
+static uint32_t sx_seen_n;
+#define FELUCCA_SYSEX_BYTE(b) (sx_seen_n < sizeof sx_seen ? (void)(sx_seen[sx_seen_n++] = (b)) : (void)0)
 #include "../chip/usb.c"
 
 #if FELUCCA_USB_HOST
@@ -852,10 +855,17 @@ int main(void)
         assert(usb.uboot_req);
         usb.uboot_req = 0;
     }
+    {   /* FELUCCA_SYSEX_BYTE sees every byte of a SysEx, F0 and F7 too, in the order they came */
+        static const uint8_t SX[5] = {0xF0, 0x7D, 0x01, 0x02, 0xF7};
+        sx_seen_n = 0;
+        midi_in_event(0x04u | 0xF0u << 8 | 0x7Du << 16 | 0x01u << 24);
+        midi_in_event(0x06u | 0x02u << 8 | 0xF7u << 16);
+        assert(sx_seen_n == 5u && memcmp(sx_seen, SX, 5u) == 0);
+    }
     usb_detach();
     usb_retry(5000u);
     assert(!usb.up);
-    puts("USB device-only/loader: startup, MIDI output and detach: OK");
+    puts("USB device-only/loader: startup, MIDI output, the SysEx byte hook and detach: OK");
     return 0;
 }
 #endif

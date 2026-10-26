@@ -952,6 +952,11 @@ static void sysex_byte(uint8_t b)
 #endif
         return;                                        /* another status aborts the unfinished frame */
     }
+#ifdef FELUCCA_SYSEX_BYTE
+    FELUCCA_SYSEX_BYTE(b);                             /* the firmware's: every byte of a SysEx from USB, F0 and F7
+                                                        * too (realtime left out), for its own frames longer than the
+                                                        * buffer below (a DX7 bank: 4104 bytes); USB interrupt */
+#endif
     if (b == 0xF0) {
         usb.sx_on = 1;
         usb.sx_len = 0;
