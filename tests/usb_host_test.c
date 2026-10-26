@@ -836,6 +836,22 @@ int main(void)
     usb.config = 1;
     assert(midi_out_try(0x643c9009u));
     assert(midi_out_room() == MQ - 1u);
+    {   /* a SysEx whose bytes come one a packet (CIN 0xF), as macOS sends some inside a long frame: taken as SysEx
+         * (here the update key, F0 22 24 35 7D F7); a note's status alone in CIN 0xF outside a SysEx is not */
+        static const uint8_t KEY[6] = {0xF0, 0x22, 0x24, 0x35, 0x7D, 0xF7};
+        uint32_t k, w = mi_w;
+        midi_in_event(0x0Fu | 0x90u << 8);
+        assert(!usb.sx_on && mi_w == w);
+        midi_in_event(0x04u | 0xF0u << 8 | 0x22u << 16 | 0x24u << 24);   /* (F0 22 24 in one packet, the rest alone) */
+        for (k = 3; k < 6u; k++)
+            midi_in_event(0x0Fu | (uint32_t)KEY[k] << 8);
+        assert(usb.uboot_req && !usb.sx_on);
+        usb.uboot_req = 0;
+        for (k = 0; k < 6u; k++)                          /* (every byte alone) */
+            midi_in_event(0x0Fu | (uint32_t)KEY[k] << 8);
+        assert(usb.uboot_req);
+        usb.uboot_req = 0;
+    }
     usb_detach();
     usb_retry(5000u);
     assert(!usb.up);

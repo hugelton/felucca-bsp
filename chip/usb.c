@@ -1002,6 +1002,11 @@ static void midi_in_event(uint32_t pkt)                 /* one USB-MIDI event pa
             sysex_byte((uint8_t)(pkt >> (8u * (k + 1u))));
         return;
     }
+    if (cin == 0xFu && st < 0xF8u && (usb.sx_on || st == 0xF0u)) {
+        sysex_byte((uint8_t)st);                       /* a SysEx byte alone (CIN 0xF, a single byte): macOS sends some
+                                                        * so inside a long frame (Melodee 55a0d62, for DX7 banks) */
+        return;
+    }
     if (st >= 0x80u && st < 0xF8u) {
         usb.sx_on = 0;                                 /* channel/system common also ends SysEx */
 #if FELUCCA_OTA
