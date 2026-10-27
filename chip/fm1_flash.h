@@ -52,9 +52,10 @@ static inline void *fl_far(void *p) { void *volatile q = p; return q; }
 #define FL_STORE_OK(off, n) (FL_IN(off, n, FL_DATA_LO, FL_DATA_HI) || FL_IN(off, n, FL_GLOB_LO, FL_GLOB_HI) || \
                              FL_IN(off, n, FL_AUTO_LO, FL_AUTO_HI))
 /* More flash for a firmware's own data, outside the store: between the app area (the loader writes only below
- * 0x93000) and the store, and from above the autosave up to the globals. The update loader clears an update
- * record it finds at a 4 KiB boundary - 256 here (ldr_core.c: "AT" at bytes 6..7 and a valid CRC), so a firmware
- * keeps bytes 0xF00..0xF07 of each of these sectors erased (or anything but a record) */
+ * 0x93000) and the store, and from above the autosave up to the globals. The update loader makes an update
+ * record it finds at a 4 KiB boundary - 256 here invalid in place (ldr_core.c: "AT" at bytes 6..7 and a valid CRC;
+ * its first bytes, 8 to 80, programmed to 0, the rest of the sector kept), so a firmware keeps bytes 0xF00..0xF07 of
+ * each of these sectors erased (or anything but a record) */
 #define FL_XDATA0_LO    0x00093000u
 #define FL_XDATA0_HI    0x00097000u
 #define FL_XDATA1_LO    0x000E7000u
