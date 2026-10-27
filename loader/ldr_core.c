@@ -19,7 +19,11 @@
  *   4. asks 0xF0000000 ("success"), then invalidates the update record (RAM
  *      and flash: 4K boundary - 256 between 0x93000 and 0xFC000, outside
  *      Felucca's store, where only user data lives) so the SPL boots the new
- *      app, and resets.
+ *      app, and resets. Only the records go: the loader's own staging sector
+ *      (ota.c's 0xE4F00) is erased, as before; a record anywhere else (the
+ *      stock firmware's in the SDK's VM, an app's data that reads as one) is
+ *      made invalid where it is, its first bytes programmed to 0, and the
+ *      rest of its sector is kept (ldr_record_kill).
  * Power loss during 3: the record is still there, the SPL runs the loader
  * again on the next power-on and the host can resume.
  *
@@ -107,6 +111,32 @@ static int ldr_check(uint32_t fl_off, uint32_t fl_size, uint32_t want, uint16_t 
     return crc == want ? 0 : -12;
 }
 
+/* an update record as the loader takes one: "AT" at bytes 6..7, a nonzero CRC-16 at 0 over the 78 bytes from 2 */
+static int ldr_is_record(const uint8_t *r)
+{
+    return ota_rd16(r + 6) == 0x5441u && ota_rd16(r) && ota_rd16(r) == ota_crc16(r + 2, 78, 0);
+}
+
+/* a record outside the loader's own staging, at at (r: its 80 bytes as read): made invalid where it is, nothing else
+ * of its sector changed. Its first k bytes are programmed to 0 (NOR: bits only go to 0, no erase): the CRC field 0,
+ * the layout's magic and "AT" gone, and k grows from 8 until the CRC over bytes 2..79 is nonzero, so neither a CRC
+ * check nor "AT" can take it any more. 0 = read back, no record there now */
+static int ldr_record_kill(uint32_t at, uint8_t *r)
+{
+    static uint8_t zero[80];                         /* (in RAM, as the driver wants its sources) */
+    uint32_t k, i;
+    for (k = 0; k < 8u; k++)
+        r[k] = 0;
+    while (k < 80u && !ota_crc16(r + 2, 78, 0))
+        r[k++] = 0;
+    if (!ota_crc16(r + 2, 78, 0) || ldr_prog(at, zero, k) || ldr_fread(at, r, 80))
+        return -1;
+    for (i = 0; i < k; i++)
+        if (r[i])
+            return -1;
+    return ota_crc16(r + 2, 78, 0) ? 0 : -1;
+}
+
 static int ldr_session(void)
 {
     static uint8_t hdr[0x400], sec[0x1000], cur[0x1000];
@@ -176,8 +206,12 @@ static int ldr_session(void)
             continue;                                    /* Felucca's store: user data that may look like one */
         if (ldr_fread(s - 0x100u, r, 80))
             break;
-        if (ota_rd16(r + 6) == 0x5441u && ota_rd16(r) && ota_rd16(r) == ota_crc16(r + 2, 78, 0))
-            ldr_erase(s - 0x1000u);
+        if (!ldr_is_record(r))
+            continue;
+        if (s - 0x100u == OTA_RES || ldr_record_kill(s - 0x100u, r))
+            ldr_erase(s - 0x1000u);                      /* the loader's own staging sector (ota.c stages it whole
+                                                          * anyway); else a record that would not go in place: a
+                                                          * record left would bring the SPL back here at every start */
     }
     return 0;
 }
