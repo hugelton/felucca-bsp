@@ -72,7 +72,13 @@ enum { FM1_CPU1_MISREAD = 1, FM1_CPU1_LATE = 2, FM1_CPU1_BARRED = 3, FM1_CPU1_FA
 
 extern void fm1_cpu1_entry(void);                       /* fm1_cpu1.S */
 extern uint32_t fm1_cpu1_ustack[], fm1_cpu1_sstack_top[];
-#define FM1_CPU1_USTACK_WORDS (2816u / 4u)              /* (fm1_cpu1.S) */
+#ifndef FM1_CPU1_USTACK_BYTES
+#define FM1_CPU1_USTACK_BYTES 2816                      /* the jobs' stack, bytes (fm1_cpu1.S reads the same macro): a build may
+                                                         * set more for deeper jobs, a multiple of 8, the lowest 256 B a guard */
+#endif
+#define FM1_CPU1_USTACK_WORDS (FM1_CPU1_USTACK_BYTES / 4u)   /* (fm1_cpu1.S) */
+_Static_assert(FM1_CPU1_USTACK_BYTES % 8 == 0 && FM1_CPU1_USTACK_BYTES > 256,
+               "FM1_CPU1_USTACK_BYTES: a multiple of 8, above the 256 B guard");
 #define FM1_CPU1_MARK 0x43314D4Bu                       /* "C1MK": how deep its stack has gone */
 
 typedef void (*fm1_cpu1_fn)(uint32_t);
