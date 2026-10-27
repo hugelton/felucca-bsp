@@ -12,7 +12,10 @@
  *   2b. reads the whole flash.bin once and checks it against the CRC16 of its
  *      UFW entry (the vendor tools' check), keeping each app sector's CRC16:
  *      a damaged or truncated package is refused before anything is erased;
- *   3. writes ONLY the app area [0x4000, 0x93000), sector by sector, skipping
+ *   2c. with LDR_SLOT_SWITCH (an app whose slot size is set: FL_APP_END), when the installed app's area ends
+ *      elsewhere: going down, erases the old app's code above this one's end (it would read as data); going up,
+ *      erases [FL_APP_END, LDR_CLEAR_END) when the app sets it (the data a smaller app kept where this one's now is);
+ *   3. writes ONLY the app area [0x4000, FL_APP_END) (0x93000, or the app's bigger slot), sector by sector, skipping
  *      sectors that are already equal, and verifies each one; a sector that
  *      comes in different from the checked pass is read again, never written;
  *      the flash head (SPL, isd_config) is never written;
@@ -33,10 +36,14 @@
  *   ldr_progress(done, total)  both passes on one scale: the check (2b, flash.bin) then the write (3, the app area)
  * plus the ota.c hooks (frames, time, idle). */
 #define LDR_APP_LO 0x4000u
-#define LDR_APP_HI 0x93000u
-#define LDR_REC_LO 0x93000u                     /* update records live above the app ... */
+#ifndef FL_APP_END
+#define FL_APP_END 0x93000u                     /* (fm1_flash.h's: the app area's end, or the app's bigger slot) */
+#endif
+#define LDR_APP_HI FL_APP_END
+#define LDR_REC_LO FL_APP_END                   /* update records live above the app ... */
 #define LDR_REC_HI 0xFC000u                     /* ... and below Felucca's globals (Felucca's records: 0xE4F00, */
-#define LDR_DATA_LO 0x97000u                    /* the stock firmware's: 0xE8F00), never in Felucca's store, whose */
+#define LDR_DATA_LO (FL_APP_END > 0x97000u ? FL_APP_END : 0x97000u)   /* (the stock firmware's: 0xE8F00), never in
+                                                 * Felucca's store (fm1_flash.h FL_DATA_LO), whose */
 #define LDR_DATA_HI 0xE0000u                    /* bytes (user samples) the host writes */
 #define LDR_NSEC ((LDR_APP_HI - LDR_APP_LO) >> 12)
 #define LDR_FL_MAX 0x100000u                    /* flash.bin: at most the 1 MiB part */
@@ -137,6 +144,32 @@ static int ldr_record_kill(uint32_t at, uint8_t *r)
     return ota_crc16(r + 2, 78, 0) ? 0 : -1;
 }
 
+#if defined(LDR_SLOT_SWITCH) && LDR_SLOT_SWITCH
+/* 2c. the installed app's slot against this one's (before anything is written, so a resumed install, the old head
+ * still there, does the same): its end from its app area head (0x4000, the chip key's cipher: the block it heads, as
+ * fm1pkg_make.py writes it, rounded up to a sector); no head of that format: nothing cleared */
+static int ldr_slot_switch(uint32_t key, uint8_t *b)
+{
+    uint32_t end, s, lo = 0, hi = 0;
+    if (ldr_fread(LDR_APP_LO, b, 32))
+        return -8;
+    ldr_sfc(b, 32, 0, key);
+    if (ota_crc16(b + 2, 30, 0) != ota_rd16(b))
+        return 0;
+    end = (LDR_APP_LO + ota_rd32(b + 8) + 0xFFFu) & ~0xFFFu;
+    if (end > LDR_APP_HI && end <= LDR_DATA_HI)
+        lo = LDR_APP_HI, hi = end;                   /* (a bigger app's code tail) */
+#ifdef LDR_CLEAR_END
+    else if (end < LDR_APP_HI)
+        lo = LDR_APP_HI, hi = LDR_CLEAR_END;         /* (a smaller app's data where this one keeps its own) */
+#endif
+    for (s = lo; s < hi; s += 0x1000u)
+        if (ldr_erase(s))
+            return -9;
+    return 0;
+}
+#endif
+
 static int ldr_session(void)
 {
     static uint8_t hdr[0x400], sec[0x1000], cur[0x1000];
@@ -162,6 +195,10 @@ static int ldr_session(void)
     /* 2b. the whole package first: nothing is erased for a damaged one */
     if ((rc = ldr_check(fl_off, fl_size, want, sc, sec)) != 0)
         return rc;
+#if defined(LDR_SLOT_SWITCH) && LDR_SLOT_SWITCH
+    if ((rc = ldr_slot_switch(key, sec)) != 0)
+        return rc;
+#endif
     /* 3. app area, sector by sector */
     for (s = LDR_APP_LO; s < LDR_APP_HI; s += 0x1000u) {
         uint32_t again;

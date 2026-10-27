@@ -36,7 +36,13 @@ static inline void *fl_far(void *p) { void *volatile q = p; return q; }
 #define T4_CNT          REG32(0x10804u)            /* TIMER4, 24 MHz free-running */
 
 #define FL_XIP(off)     FM1_XIP(off)              /* fm1_xip.h */
-#define FL_DATA_LO      0x00097000u                /* Felucca main store */
+/* the app area's end: the update loader writes [0x4000, FL_APP_END). 0x93000, or a firmware's bigger slot (its build
+ * defines FL_APP_END, a 4 KiB boundary up to 0xE0000): its code then runs past the old end, and the plain window, the
+ * store and XDATA0 start above it (XDATA0 empty from 0x97000 on) */
+#ifndef FL_APP_END
+#define FL_APP_END      0x00093000u
+#endif
+#define FL_DATA_LO      (FL_APP_END > 0x00097000u ? FL_APP_END : 0x00097000u)   /* Felucca main store */
 #define FL_DATA_HI      0x000E0000u
 #define FL_GLOB_LO      0x000FC000u                /* Felucca superblock / globals */
 #define FL_GLOB_HI      0x000FF000u
@@ -56,7 +62,7 @@ static inline void *fl_far(void *p) { void *volatile q = p; return q; }
  * record it finds at a 4 KiB boundary - 256 here invalid in place (ldr_core.c: "AT" at bytes 6..7 and a valid CRC;
  * its first bytes, 8 to 80, programmed to 0, the rest of the sector kept), so a firmware keeps bytes 0xF00..0xF07 of
  * each of these sectors erased (or anything but a record) */
-#define FL_XDATA0_LO    0x00093000u
+#define FL_XDATA0_LO    (FL_APP_END < 0x00097000u ? FL_APP_END : 0x00097000u)
 #define FL_XDATA0_HI    0x00097000u
 #define FL_XDATA1_LO    0x000E7000u
 #define FL_XDATA1_HI    0x000FC000u
@@ -248,11 +254,11 @@ static RAMFN int fl_read_ram(uint32_t off, uint8_t *dst, uint32_t n)   /* 0x0B f
 static void fl_plain_window_init(void)
 {
     SFCENC_CON &= (uint8_t)~2u;
-    SFCENC_UNENC_L = FL_XIP(0x93000u);            /* 0x0208F000 */
+    SFCENC_UNENC_L = FL_XIP(FL_APP_END);          /* 0x0208F000 (above a bigger slot: its end) */
     SFCENC_UNENC_H = 0x07FFFFFFu;
     SFCENC_CON |= 2u;
     __asm__ volatile("cli" ::: "memory");
-    fl_inval(0x93000u, 0x100000u - 0x93000u);     /* drop any decrypted lines */
+    fl_inval(FL_APP_END, 0x100000u - FL_APP_END); /* drop any decrypted lines */
     __asm__ volatile("csync\n\tsti" ::: "memory");
 }
 
