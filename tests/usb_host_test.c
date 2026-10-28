@@ -11,10 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
 #include "../chip/fm1_usb.h"
-#pragma GCC diagnostic pop
 
 /* ------------------------------------------------------- the devices --- */
 enum { KBD, HUB, STICK, NDEV };
