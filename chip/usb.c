@@ -259,6 +259,20 @@ static volatile uint8_t midi_usb_lost;                  /* consume in the app: r
 static uint32_t usb_retry_ms;
 static int usb_midi_out_ready(void);
 static volatile uint8_t midi_in_overflow;               /* audio ISR discards a broken stream and releases notes */
+/* FELUCCA_MIDI_STAMP=1: when each message in came in, in midi_in_t24 beside it, on the caller's free-running clock
+ * (TIMER4's 24 MHz count, say). The caller runs usb_midi_peek(t) from a tick faster than the poll (10 kHz), the ticks
+ * that wait for the render too; an EP1 OUT packet seen there for the first time came in at about t (the tick's time
+ * less half the time since the last one), and ep1_rx gives its events that time when it takes the packet, however
+ * late the poll. A packet first seen by the poll itself takes the last peek's t. A producer that writes midi_in_q
+ * itself (a TRS parser) stores its own stamp. Within half a peek interval of the packet's landing, against the poll's
+ * half interval (2 kHz: 0.25 ms) plus the time a poll waits */
+#ifndef FELUCCA_MIDI_STAMP
+#define FELUCCA_MIDI_STAMP 0
+#endif
+#if FELUCCA_MIDI_STAMP
+static uint32_t midi_in_t24[MQ];
+static uint32_t midi_rx_t;                              /* the stamp midi_enqueue gives (ep1_rx sets it) */
+#endif
 
 static int midi_enqueue(uint32_t pkt, uint32_t source)
 {
@@ -271,6 +285,9 @@ static int midi_enqueue(uint32_t pkt, uint32_t source)
     }
     midi_in_q[at] = pkt;
     midi_in_ms[at] = fm1_ms;
+#if FELUCCA_MIDI_STAMP
+    midi_in_t24[at] = midi_rx_t;
+#endif
     midi_in_source[at] = (uint8_t)source;
     RING_PUBLISH();
     mi_w++;
@@ -1060,6 +1077,31 @@ static int usb_midi_out_ready(void)
     return usb.config;
 }
 
+#if FELUCCA_MIDI_STAMP
+/* the peek (FELUCCA_MIDI_STAMP, above): one SIE read and a store a tick. INTRRX1 clears on read, so what it held goes
+ * to the poll in usb_rx_seen. It runs in the same interrupt as usb_poll, never inside it (INDEX is not touched), and
+ * only while the poll would read the endpoint (a host configured us, not the USB host) */
+static uint32_t ep1_t, usb_peek_t;
+static uint8_t ep1_seen, usb_rx_seen;
+static void usb_midi_peek(uint32_t t)
+{
+    uint32_t ir;
+    usb_peek_t = t;
+#if FELUCCA_USB_HOST
+    if (uh.on)
+        return;
+#endif
+    if (!usb.up || !usb.config || ep1_seen)
+        return;
+    ir = sie_rd(S_INTRRX1);
+    usb_rx_seen |= (uint8_t)ir;
+    if (ir & 0x02u) {
+        ep1_t = t;
+        ep1_seen = 1;
+    }
+}
+#endif
+
 static void ep1_rx(void)                                /* leaves the packet (NAK) while the ring is too full */
 {
     uint32_t csr, n;
@@ -1067,14 +1109,23 @@ static void ep1_rx(void)                                /* leaves the packet (NA
     csr = sie_rd(S_RXCSR1) | (sie_rd(S_RXCSR2) << 8);
     if (!(csr & 1u)) {
         usb.rx_pend = 0;
+#if FELUCCA_MIDI_STAMP
+        ep1_seen = 0;
+#endif
         return;
     }
     n = sie_rd(S_RXCOUNT1) | (sie_rd(S_RXCOUNT2) << 8);
     if (n > 64u)
         n = 64u;
     fm1_usb_rx_sync();
+#if FELUCCA_MIDI_STAMP
+    midi_rx_t = ep1_seen ? ep1_t : usb_peek_t;
+#endif
     if (!ep1_take(ep1rx, n))
         return;                                         /* rx_pend stays: retried next poll */
+#if FELUCCA_MIDI_STAMP
+    ep1_seen = 0;
+#endif
     usb.rx_pend = 0;
     usb.rx_pkts++;
     csr = (csr & ~0x164u) | 0x10u;
@@ -1566,6 +1617,9 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
     uint32_t iu, it, ir;
 #if FELUCCA_USB_HOST
     if (uh.on) {
+#if FELUCCA_MIDI_STAMP
+        midi_rx_t = usb_peek_t;                         /* (a device's MIDI in: the poll's time) */
+#endif
         if (uh.run) uh_poll();
         return;
     }
@@ -1603,6 +1657,10 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
     it = sie_rd(S_INTRTX1);                             /* EP0..7 only: skipping INTR*2 saves */
     ir = sie_rd(S_INTRRX1);                             /* 2 SIE round trips per poll */
 #endif
+#if FELUCCA_MIDI_STAMP
+    ir |= usb_rx_seen;                                  /* (what the peeks read since the last poll) */
+    usb_rx_seen = 0;
+#endif
     if (iu & 0x01u) {                                   /* suspend: the bus went idle */
         usb.suspends++;
         usb.suspended = 1;
@@ -1627,6 +1685,9 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
         usb.e0_tx = 0;
         usb.has_pend_addr = 0;
         usb.rx_pend = 0;
+#if FELUCCA_MIDI_STAMP
+        ep1_seen = 0;
+#endif
 #if FELUCCA_CDC
         cdc.dtr = 0;
         cdc.e0_rx = 0;
