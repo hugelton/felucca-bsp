@@ -10,7 +10,7 @@ SANITIZE=${USB_TEST_SANITIZE--fsanitize=address,undefined}
 D="-DTEST_HOST=0 -DTEST_UAC=1"
 # desc-*: the device descriptors in an option set. TEST_GOLDEN_* are the CRC-32s the bsp built before
 # FELUCCA_UAC_MIDI_LAST (with it and FELUCCA_UAC_IAD 0, a build's descriptors stay byte for byte).
-for mode in host host-audio device loader \
+for mode in host host-audio host-name device loader \
         desc-midi desc-in desc-in-cdc desc-in-cdc1 desc-in-48k desc-asfirst desc-out desc-out-asfirst-cdc \
         desc-out-48k-asfirst desc-last desc-last-cdc desc-last-cdc1 desc-last-48k desc-last-out \
         desc-last-out-cdc desc-last-out-48k-cdc2 desc-last-asfirst desc-last-iad desc-last-out-iad-cdc desc-iad \
@@ -18,6 +18,7 @@ for mode in host host-audio device loader \
     case "$mode" in
         host) flags="" ;;
         host-audio) flags="-DTEST_UAC=1" ;;
+        host-name) flags="-DFELUCCA_USB_HOST_NAME=1" ;;
         device) flags="-DTEST_HOST=0" ;;
         loader) flags="-DFELUCCA_LOADER=1" ;;
         desc-midi) flags="-DTEST_HOST=0 -DTEST_GOLDEN_PLAIN=0xD8A90D6A -DTEST_GOLDEN_CDC=0xB0107332" ;;
