@@ -1,0 +1,15 @@
+name: Dim pulse test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  dim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The dim pulse at any width (fm1_led_dim_ns)
+        env:
+          CC: clang
+        run: tests/run_dim_test.sh
