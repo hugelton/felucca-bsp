@@ -5,12 +5,13 @@ set -eu
 cd "$(dirname "$0")/.."
 USB_TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$USB_TEST_DIR"' EXIT HUP INT TERM
-for mode in host host-audio device loader; do
+for mode in host host-audio host-name device loader; do
     case "$mode" in
         host) flags="" ;;
         host-audio) flags="-DTEST_UAC=1" ;;
         device) flags="-DTEST_HOST=0" ;;
         loader) flags="-DFELUCCA_LOADER=1" ;;
+        host-name) flags="-DFELUCCA_USB_HOST_NAME=1" ;;
     esac
     # Word splitting is intentional for the fixed compiler options above.
     "${CC:-cc}" -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-function \

@@ -38,6 +38,11 @@
 #undef FELUCCA_USB_HOST
 #define FELUCCA_USB_HOST 0
 #endif
+/* FELUCCA_USB_HOST_NAME=1 (with the host): the attached device's product string, read once at enumeration
+ * (usb_host_name). Off by default: the host's code and its requests stay as they were. */
+#ifndef FELUCCA_USB_HOST_NAME
+#define FELUCCA_USB_HOST_NAME 0
+#endif
 #ifndef FELUCCA_CDC
 #define FELUCCA_CDC 0
 #endif

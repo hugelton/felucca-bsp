@@ -28,6 +28,12 @@ For host mode:
 - Incoming channel messages and clock/start/continue/stop enter the existing MIDI
   ring with source 1 and `fm1_ms` timestamps. Drain it normally. Host input drops
   cable numbers and ignores SysEx, including update/editor commands.
+- With `FELUCCA_USB_HOST_NAME=1` too, `usb_host_name()` returns the connected
+  device's product string (its iProduct, in the first language it lists), read once
+  at enumeration after SET_CONFIGURATION: ASCII, other characters as `?`, at most 31
+  characters. It is empty while nothing is connected, and for a device without a
+  product string or whose string request fails; the connection does not depend on
+  it. The default (0) leaves the host code and its requests as they were.
 - Use `midi_out_try(packet)` to enqueue a four-byte USB MIDI 1.0 event on cable 0;
   0 means disconnected, no OUT endpoint or ring full. `midi_out_event` retains its
   existing fire-and-forget API. `midi_out_room()` and `midi_out_link()` expose output
@@ -75,7 +81,7 @@ Run `tests/run_usb_host_tests.sh` with a host C compiler. It runs the production
 USB source against a keyboard/hub/storage SIE model under ASan/UBSan: parsing,
 malformed/truncated descriptors, full input ring, direct/hub duplex I/O, ACK-owned
 output, NAK/errors/stalls/timeouts, input/output-only endpoints, disconnect/reconnect,
-idle hubs and unsupported devices without repeated resets/waits, downstream hot-plug,
+idle hubs and unsupported devices without repeated resets/waits, downstream hot-plug, the product string (FELUCCA_USB_HOST_NAME),
 audio/CDC mode handover, host-disabled builds and forced device-only loaders.
 
 Melodee's original host input was reported working by its contributor and maintainer.
