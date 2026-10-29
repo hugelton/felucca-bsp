@@ -29,6 +29,11 @@ they were first published under GPL-3.0-only by the same copyright holder. Each 
 message names the Felucca commit it was taken from. Releases of Felucca that already
 contain these files stay under GPL-3.0-only.
 
+The cache RAM (chip/fm1_cache_ram.h): Copyright (C) 2026 Henri David, from Optimist (https://github.com/w0ts/optimist,
+firmware/hal/fm1_cache.h, f16f6683 and 9a1360ab), offered there under GPL-3.0-only OR MPL-2.0 (Optimist LICENSING.md
+"The cache RAM", 3815869f) and taken here under MPL-2.0; its register addresses and sequence are the AC79 SDK's
+(Apache-2.0). tests/cache_ram_test.c: Copyright (C) 2026 Henri David, MPL-2.0.
+
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi.
 
 USB MIDI host (chip/usb_host.c, chip/usb_host_desc.h, the host additions in chip/fm1_usb.h,
