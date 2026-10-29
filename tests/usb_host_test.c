@@ -201,6 +201,7 @@ static void deliver_rx(void)            /* an IN request is pending on EP1 and t
     d = by_addr(common[0]);
     if (!d || d != &dev[KBD] || rx_head == rx_tail)
         return;
+    assert(ep_radr[1]);                                 /* the host code gave EP1 its buffer */
     memcpy(ep_radr[1], rx_q[rx_tail % 8], rx_n[rx_tail % 8]);
     regs[1][22] = rx_n[rx_tail % 8];
     regs[1][23] = 0;
@@ -222,6 +223,7 @@ static void mock_write(uint32_t r, uint32_t v)
         if (v == 0x0A) {
             setup_requests++;
             uint8_t s[8];
+            assert(ep_radr[0]);                         /* the host code gave EP0 its buffer */
             memcpy(s, ep_radr[0], 8);
             if (ep0_timeout)
                 regs[0][17] = 2;
@@ -233,6 +235,7 @@ static void mock_write(uint32_t r, uint32_t v)
             uint32_t mps = d && d->mps0 ? d->mps0 : 8u, n = rsp_len - rsp_pos;
             if (n > mps)
                 n = mps;
+            assert(ep_radr[0]);                         /* the host code gave EP0 its buffer */
             memcpy(ep_radr[0], rsp + rsp_pos, n);
             rsp_pos += n;
             regs[0][22] = (uint8_t)n;
