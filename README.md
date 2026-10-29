@@ -9,8 +9,8 @@ Named after its first user, Felucca; it is not tied to that application.
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi. Product and company names
 belong to their owners.
 
-> **Experimental parts.** Some features here are **beta**: the second core (`chip/fm1_cpu1.*`) and expanded flash
-> (`chip/fm1_flash_ext.h`). USB MIDI host is ported from Melodee, where input has run on hardware;
+> **Experimental parts.** Some features here are **beta**: the second core (`chip/fm1_cpu1.*`), expanded flash
+> (`chip/fm1_flash_ext.h`) and the cache RAM (`chip/fm1_cache_ram.h`). USB MIDI host is ported from Melodee, where input has run on hardware;
 > this BSP port and its OUT path still need device validation. A higher clock remains a **concept**.
 > What is established and what is not: [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md). The safe test
 > firmware (`examples/hwtest/hwtest.bin`) contains none of them. Bluetooth MIDI and WiFi, on JieLi's own
