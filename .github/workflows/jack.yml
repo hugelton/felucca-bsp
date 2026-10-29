@@ -1,0 +1,15 @@
+name: Headphone jack test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  jack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The headphone jack's switch (fm1_hp_in)
+        env:
+          CC: clang
+        run: tests/run_jack_test.sh
