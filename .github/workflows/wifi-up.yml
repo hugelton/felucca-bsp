@@ -1,0 +1,15 @@
+name: Wi-Fi start-up test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  wifi-up:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: fm1_wifi_up's writes and the tuning's register facts (chip/fm1_wifi.h)
+        env:
+          CC: clang
+        run: tests/run_wifi_up_test.sh
