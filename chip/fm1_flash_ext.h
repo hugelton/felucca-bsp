@@ -2,7 +2,8 @@
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
 /* Expanded flash, EXPERIMENTAL: what to do when the FM-1's SOIC-8 flash (stock: a 1 MiB part, JEDEC 85 60 14) is
  * replaced by a larger one. Pure logic, no registers: it decides the size and where the extra room is. The
- * read/erase/program entry points stay those of fm1_flash.h; they only need the limit passed in.
+ * read/erase/program entry points stay those of fm1_flash.h: set FM1_FLASH_SIZE and
+ * FM1_FLASH_WRITE_REGIONS before inclusion, then check the detected size before allowing writes.
  *
  * Standard SPI NOR (Winbond, GigaDevice, Puya, Macronix, ...) puts the capacity in the last JEDEC byte as
  * log2(bytes): 0x14 = 1 MiB, 0x15 = 2, 0x16 = 4, 0x17 = 8, 0x18 = 16 MiB, 0x19 = 32 MiB.

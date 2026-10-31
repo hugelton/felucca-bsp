@@ -22,8 +22,9 @@ by 1000 each time, `late=`, `rejected=` and `faults=` stay 0 (on a unit that mis
 ## Expanded flash: `chip/fm1_flash_ext.h`
 
 For a larger part soldered in place of the stock SOIC-8 flash. Done: size from the JEDEC id, the range check for the
-room above the stock 1 MiB, a host test (`tests/flash_ext_test.c`). Not done: hooking it into the erase/program
-entry points of `fm1_flash.h`, 4-byte addressing above 16 MiB.
+room above the stock 1 MiB, a host test (`tests/flash_ext_test.c`). The runtime driver accepts an explicit physical capacity and application write
+regions up to 16 MiB ([configuration](FLASH.md#replacement-flash-parts)); JEDEC discovery does not automatically
+widen write permissions. Not done: hardware qualification and 4-byte addressing above 16 MiB.
 Unknown: how much flash the XIP window maps, the quad-enable bit of other vendors' parts. First test: read the
 JEDEC id of a swapped part and check that the stock layout still boots.
 

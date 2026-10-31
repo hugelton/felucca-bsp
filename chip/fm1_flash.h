@@ -1,20 +1,26 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio): configurable policy and access guards
  * Written against the public JieLi AC79 SDK (Apache-2.0); see NOTICE. */
-/* FM-1 SPI NOR at runtime: erase / program / read. Used only when
- * FELUCCA_FLASH is 1.
+/* FM-1 SPI NOR at runtime: erase / program / read.
  *
  * Everything that executes while the SFC (XIP) is switched off lives in
  * .ram_text and touches only SFRs, the stack and RAM buffers: no .rodata, no
  * libcalls, no XIP-resident helpers. Call the fl_*_ram() entry points with
- * interrupts disabled. Same sequence as the AC79 SDK flash driver
+ * interrupts disabled; fl_enter also checks CPU0/CPU1 access before disabling XIP.
+ * Use the fl_* wrappers below from normal code. Configure capacity and write
+ * regions before inclusion (fm1_flash_policy.h); see docs/FLASH.md. Same sequence as the AC79 SDK flash driver
  * (cpu.a/vm_sfc.c.o: enter_spi_code, norflash_erase, norflash_wait_ok, exit_spi_code).
  */
 #pragma once
 #include <stdint.h>
 #include "fm1_xip.h"
+#include "fm1_flash_policy.h"
+#include "fm1_flash_access.h"
 
+#ifndef RAMFN
 #define RAMFN  __attribute__((section(".ram_text"), noinline, used))
+#endif
 #define RAMINL static inline __attribute__((always_inline))
 
 /* XIP (0x02xxxxxx) -> RAM (0x01C0xxxx) is beyond the 23-bit call range:
@@ -22,9 +28,17 @@
 static inline void *fl_far(void *p) { void *volatile q = p; return q; }
 #define FL_FAR(fn) ((__typeof__(&fn))fl_far((void *)&fn))
 
+#ifndef REG32
 #define REG32(a) (*(volatile uint32_t *)(a))
+#endif
+#ifndef FM1_FLASH_REG8
+#define FM1_FLASH_REG8(a) (*(volatile uint8_t *)(a))
+#endif
+#ifndef FM1_FLASH_FLUSHINV
+#define FM1_FLASH_FLUSHINV(a) __asm__ volatile("flushinv [%0]" :: "r"(a) : "memory")
+#endif
 #define SFC_CON         REG32(0x40200u)            /* bit31 busy; [11:8] read mode */
-#define SFCENC_CON      (*(volatile uint8_t *)0x40300u)  /* b0 decrypt, b1 plain window */
+#define SFCENC_CON      FM1_FLASH_REG8(0x40300u)        /* b0 decrypt, b1 plain window */
 #define SFCENC_UNENC_H  REG32(0x40308u)            /* WO, XIP (CPU) address */
 #define SFCENC_UNENC_L  REG32(0x4030Cu)            /* WO, XIP (CPU) address */
 #define SPI0_CON        REG32(0x11C00u)            /* b15 PND, b14 PCLR, b12 DIR=rx */
@@ -36,39 +50,9 @@ static inline void *fl_far(void *p) { void *volatile q = p; return q; }
 #define T4_CNT          REG32(0x10804u)            /* TIMER4, 24 MHz free-running */
 
 #define FL_XIP(off)     FM1_XIP(off)              /* fm1_xip.h */
-#define FL_DATA_LO      0x00097000u                /* Felucca main store */
-#define FL_DATA_HI      0x000E0000u
-#define FL_GLOB_LO      0x000FC000u                /* Felucca superblock / globals */
-#define FL_GLOB_HI      0x000FF000u
-#define FL_OTA_LO       0x000E0000u                /* M-UPGRADE loader staging, ota.c */
-#define FL_OTA_HI       0x000E5000u
-#define FL_AUTO_LO      0x000E5000u                /* 1.2: the autosave (storage.c OBJ_AUTOSAVE), A/B, just above */
-#define FL_AUTO_HI      0x000E7000u                /* the OTA staging; 0xE7000 stays free */
-/* [off, off + n) inside [lo, hi), without wrapping: off + n can overflow, and
- * the 1 MiB part ignores the high address bits, so a wrapped range lands low. */
-#define FL_IN(off, n, lo, hi) ((uint32_t)(off) >= (lo) && (uint32_t)(off) <= (hi) && \
-                               (uint32_t)(n) <= (hi) - (uint32_t)(off))
-/* Felucca's own store (projects, user samples; settings; the autosave) */
-#define FL_STORE_OK(off, n) (FL_IN(off, n, FL_DATA_LO, FL_DATA_HI) || FL_IN(off, n, FL_GLOB_LO, FL_GLOB_HI) || \
-                             FL_IN(off, n, FL_AUTO_LO, FL_AUTO_HI))
-/* More flash for a firmware's own data, outside the store: between the app area (the loader writes only below
- * 0x93000) and the store, and from above the autosave up to the globals. The update loader clears an update
- * record it finds at a 4 KiB boundary - 256 here (ldr_core.c: "AT" at bytes 6..7 and a valid CRC), so a firmware
- * keeps bytes 0xF00..0xF07 of each of these sectors erased (or anything but a record) */
-#define FL_XDATA0_LO    0x00093000u
-#define FL_XDATA0_HI    0x00097000u
-#define FL_XDATA1_LO    0x000E7000u
-#define FL_XDATA1_HI    0x000FC000u
-#define FL_XDATA_OK(off, n) (FL_IN(off, n, FL_XDATA0_LO, FL_XDATA0_HI) || FL_IN(off, n, FL_XDATA1_LO, FL_XDATA1_HI))
-/* Where the RAM driver may erase / program. The app build allows only its own
- * data regions; the update loader (firmware/loader) defines its own window. */
-#ifndef FL_RANGE_OK
-#define FL_RANGE_OK(off, n) (FL_STORE_OK(off, n) || FL_XDATA_OK(off, n) || FL_IN(off, n, FL_OTA_LO, FL_OTA_HI))
-#endif
-
 typedef struct { uint32_t sfc_con, spi_con; } fl_saved_t;
 
-RAMINL void fl_csync(void) { __asm__ volatile("csync" ::: "memory"); }
+RAMINL void fl_csync(void) { FM1_FLASH_SYNC(); }
 RAMINL void fl_cache_idle(void) { while (!(CACHE_CON & 0x4000u)) ; }
 RAMINL void fl_delay(uint32_t n) { volatile uint32_t i = n; while (i--) ; }
 
@@ -109,12 +93,13 @@ RAMINL void fl_wren(void) { fl_cs(0); fl_tx(0x06); fl_cs(1); }
 RAMINL int fl_enter(fl_saved_t *s)
 {
     uint32_t mode;
+    if (!fm1_flash_access_ok()) return FL_ERR_BUSY;
     fl_cache_idle();
     s->sfc_con = SFC_CON;
     s->spi_con = SPI0_CON;
     mode = (s->sfc_con >> 8) & 0xFu;
     if (mode == 6u || mode == 7u)                 /* continuous-read XIP: not handled here */
-        return -1;
+        return FL_ERR_MODE;
     fl_csync();
     while ((int32_t)SFC_CON < 0) ;                /* SFC idle */
     SFC_CON = 0;                                  /* XIP OFF from here on */
@@ -135,11 +120,14 @@ RAMINL void fl_exit(const fl_saved_t *s)
 }
 RAMINL void fl_inval(uint32_t off, uint32_t len)
 {
-    uint32_t a = FL_XIP(off) & ~31u, e = FL_XIP(off) + len;
+    uint32_t a, e;
+    if (off >= FM1_FLASH_XIP_SIZE) return;
+    if (len > FM1_FLASH_XIP_SIZE - off) len = FM1_FLASH_XIP_SIZE - off;
+    a = FL_XIP(off) & ~31u; e = FL_XIP(off) + len;
     fl_cache_idle();
     for (; a < e; a += 32u) {
         fl_csync();
-        __asm__ volatile("flushinv [%0]" :: "r"(a) : "memory");
+        FM1_FLASH_FLUSHINV(a);
         fl_csync();
         fl_cache_idle();
     }
@@ -174,7 +162,8 @@ static RAMFN uint32_t fl_jedec_ram(void)                 /* expect 0x856014 */
 static RAMFN int fl_uid_ram(uint8_t *dst)
 {
     fl_saved_t s; uint32_t i;
-    if (fl_enter(&s)) return -2;
+    if (!FL_RAM_OK(dst, 16u)) return FL_ERR_BUFFER;
+    { int rc = fl_enter(&s); if (rc) return rc; }
     fl_cs(0);
     for (i = 0; i < 5u; i++) fl_tx(i ? 0 : 0x4B);
     for (i = 0; i < 16u; i++) dst[i] = fl_rx();
@@ -196,9 +185,10 @@ static RAMFN uint32_t fl_status_ram(void)                /* SR1 | SR2 << 8 */
 static RAMFN int fl_erase4k_ram(uint32_t off, uint32_t *took_us)
 {
     fl_saved_t s; int rc;
-    if (!FL_RANGE_OK(off, 0x1000u) || (off & 0xFFFu))
-        return -1;
-    if (fl_enter(&s)) return -2;
+    if (!FL_WRITE_OK(off, 0x1000u) || (off & 0xFFFu))
+        return FL_ERR_RANGE;
+    if (!FL_RAM_OK(took_us, sizeof *took_us)) return FL_ERR_BUFFER;
+    { int rc = fl_enter(&s); if (rc) return rc; }
     fl_wren();
     if (!(fl_rdsr(0x05) & 2u)) rc = -3;           /* WEL did not set */
     else {
@@ -213,9 +203,10 @@ static RAMFN int fl_erase4k_ram(uint32_t off, uint32_t *took_us)
 static RAMFN int fl_prog_ram(uint32_t off, const uint8_t *src, uint32_t n, uint32_t *took_us)
 {
     fl_saved_t s; int rc; uint32_t i;
-    if (!FL_RANGE_OK(off, n) ||
-        n == 0 || n > 256u || ((off & 0xFFu) + n) > 256u) return -1;    /* one page, no wrap */
-    if (fl_enter(&s)) return -2;
+    if (!FL_WRITE_OK(off, n) ||
+        n == 0 || n > 256u || ((off & 0xFFu) + n) > 256u) return FL_ERR_RANGE;    /* one page, no wrap */
+    if (!FL_RAM_OK(src, n) || !FL_RAM_OK(took_us, sizeof *took_us)) return FL_ERR_BUFFER;
+    { int rc = fl_enter(&s); if (rc) return rc; }
     fl_wren();
     if (!(fl_rdsr(0x05) & 2u)) rc = -3;
     else {
@@ -232,7 +223,9 @@ static RAMFN int fl_prog_ram(uint32_t off, const uint8_t *src, uint32_t n, uint3
 static RAMFN int fl_read_ram(uint32_t off, uint8_t *dst, uint32_t n)   /* 0x0B fast read */
 {
     fl_saved_t s; uint32_t i;
-    if (fl_enter(&s)) return -2;
+    if (!FL_READ_OK(off, n)) return FL_ERR_RANGE;
+    if (!FL_RAM_OK(dst, n)) return FL_ERR_BUFFER;
+    { int rc = fl_enter(&s); if (rc) return rc; }
     fl_cs(0); fl_tx(0x0B); fl_addr(off); fl_tx(0xFF);
     for (i = 0; i < n; i++) dst[i] = fl_rx();
     fl_cs(1);
@@ -244,50 +237,19 @@ static RAMFN int fl_read_ram(uint32_t off, uint8_t *dst, uint32_t n)   /* 0x0B f
 
 /* Once at boot, before any XIP read of the data region: map the data area
  * as an unencrypted XIP window (as the SDK's IOCTL_SET_VM_INFO does). */
-static void fl_plain_window_init(void)
-{
-    SFCENC_CON &= (uint8_t)~2u;
-    SFCENC_UNENC_L = FL_XIP(0x93000u);            /* 0x0208F000 */
-    SFCENC_UNENC_H = 0x07FFFFFFu;
-    SFCENC_CON |= 2u;
-    __asm__ volatile("cli" ::: "memory");
-    fl_inval(0x93000u, 0x100000u - 0x93000u);     /* drop any decrypted lines */
-    __asm__ volatile("csync\n\tsti" ::: "memory");
-}
-
-static inline uint32_t irq_save(void) { __asm__ volatile("cli" ::: "memory"); return 0; }
-static inline void irq_restore(uint32_t f) { (void)f; __asm__ volatile("csync\n\tsti" ::: "memory"); }
-
-static int fl_erase4k(uint32_t off, uint32_t *took_us)
+static int fl_plain_window_init(void)
 {
     uint32_t f = irq_save();
-    int rc = FL_FAR(fl_erase4k_ram)(off, took_us);
+    if (!fm1_flash_access_ok()) { irq_restore(f); return FL_ERR_BUSY; }
+    SFCENC_CON &= (uint8_t)~2u;
+    SFCENC_UNENC_L = FL_XIP(FM1_FLASH_PLAIN_LO);
+    /* Preserve the established full-window setup for the default layout. */
+    SFCENC_UNENC_H = FM1_FLASH_PLAIN_HI == FM1_FLASH_XIP_SIZE ?
+        0x07FFFFFFu : FL_XIP(FM1_FLASH_PLAIN_HI) - 1u;
+    SFCENC_CON |= 2u;
+    fl_inval(FM1_FLASH_PLAIN_LO, FM1_FLASH_PLAIN_HI - FM1_FLASH_PLAIN_LO);
     irq_restore(f);
-    return rc;
-}
-
-static int fl_write(uint32_t off, const uint8_t *src_ram, uint32_t n)
-{
-    uint32_t took;
-    while (n) {
-        uint32_t chunk = 256u - (off & 0xFFu);
-        int rc;
-        uint32_t f;
-        if (chunk > n) chunk = n;
-        f = irq_save();
-        rc = FL_FAR(fl_prog_ram)(off, src_ram, chunk, &took);
-        irq_restore(f);
-        if (rc) return rc;
-        off += chunk; src_ram += chunk; n -= chunk;
-    }
     return 0;
 }
 
-/* Read back through XIP (needs fl_plain_window_init) and compare. */
-static int fl_verify_xip(uint32_t off, const uint8_t *ref, uint32_t n)
-{
-    const volatile uint8_t *p = (const volatile uint8_t *)FL_XIP(off);
-    uint32_t i;
-    for (i = 0; i < n; i++) if (p[i] != ref[i]) return -(int)(i + 1);
-    return 0;
-}
+#include "fm1_flash_api.h"
