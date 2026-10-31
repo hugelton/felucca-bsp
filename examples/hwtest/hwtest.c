@@ -47,7 +47,7 @@ static volatile uint16_t an_v[2][11], an_top[7];
 #define FM1_INPUT_DRIVE(col, rowbit) (FM1_KEYMAP[rowbit][col] >= 14 && ((fm1_in.notes >> (FM1_KEYMAP[rowbit][col] - 14)) & 1u))
 #include "fm1_input.h"
 #include "fm1_adc.h"
-#include "fm1_lcd_hw.h"
+#include "fm1_lcd.h"
 #include "fm1_flash.h"
 #include "libc.c"
 #include "usb.c"
@@ -88,61 +88,8 @@ void fm1_timer5_irq(void)                       /* 10 kHz: key scan, ms, USB at 
 }
 extern void isr_timer5(void);
 
-/* ---- screen: ST7789 240x240, RGB565 sent high byte first (colours below are pre-swapped) ---- */
-#define C(x) ((uint16_t)((((x) >> 8) | ((x) << 8)) & 0xFFFFu))
+/* ---- screen colours and application drawing use the board panel driver ---- */
 enum { RED = 0xF800, GRN = 0x07E0, BLU = 0x001F, WHT = 0xFFFF, BLK = 0, DIM = 0x2104, CYN = 0x07FF, YEL = 0xFFE0 };
-static uint16_t row_px[240];
-
-static void lcd_cmd(uint8_t c, const uint8_t *d, uint32_t n)
-{
-    static uint8_t buf[4];
-    uint32_t i;
-    fm1_lcd_send_cmd(c);
-    fm1_lcd_wait();
-    fm1_lcd_deselect();
-    if (!n)
-        return;
-    for (i = 0; i < n; i++)
-        buf[i] = d[i];
-    fm1_lcd_send_data(buf, n);
-    fm1_lcd_wait();
-    fm1_lcd_deselect();
-}
-
-static void lcd_init(void)
-{
-    static const uint8_t colmod = 0x55, madctl = 0x00;
-    fm1_lcd_hw_init();
-    fm1_delay_ms(50);
-    lcd_cmd(0x01, 0, 0);                        /* SWRESET */
-    fm1_delay_ms(150);
-    lcd_cmd(0x11, 0, 0);                        /* SLPOUT */
-    fm1_delay_ms(120);
-    lcd_cmd(0x3A, &colmod, 1);                  /* RGB565 */
-    lcd_cmd(0x36, &madctl, 1);                  /* top-left origin, RGB */
-    lcd_cmd(0x21, 0, 0);                        /* INVON: this panel is IPS */
-    lcd_cmd(0x13, 0, 0);                        /* NORON */
-    lcd_cmd(0x29, 0, 0);                        /* DISPON: without it the panel stays dark */
-    fm1_lcd_baud(4);
-}
-
-static void lcd_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t rgb)
-{
-    uint8_t a[4];
-    uint32_t i;
-    for (i = 0; i < w; i++)
-        row_px[i] = C(rgb);
-    a[0] = 0; a[1] = (uint8_t)x; a[2] = 0; a[3] = (uint8_t)(x + w - 1u);
-    lcd_cmd(0x2A, a, 4);
-    a[1] = (uint8_t)y; a[3] = (uint8_t)(y + h - 1u);
-    lcd_cmd(0x2B, a, 4);
-    lcd_cmd(0x2C, 0, 0);
-    for (i = 0; i < h; i++) {
-        fm1_lcd_send_data(row_px, w * 2u);
-        fm1_lcd_wait();
-        fm1_lcd_deselect();
-    }
-}
 
 /* ---- the update (ota.c): the installer's M-UPGRADE session over USB-MIDI ---- */
 static uint8_t flash_ok;                        /* the expected flash part: the update may write it */
@@ -179,11 +126,11 @@ static int ota_fread(uint32_t off, void *p, uint32_t n)
 }
 static void ota_show(uint32_t step, int32_t code)   /* the steps as a bar across the bottom; red on a failure */
 {
-    lcd_rect(0, 200, 240, 24, BLK);
+    fm1_lcd_fill_rect(0, 200, 240, 24, BLK);
     if (step < 9u)
-        lcd_rect(0, 200, step * 40u, 24, CYN);
+        fm1_lcd_fill_rect(0, 200, (step > 6u ? 6u : step) * 40u, 24, CYN);
     else
-        lcd_rect(0, 200, 240, 24, code == 1 ? GRN : RED);
+        fm1_lcd_fill_rect(0, 200, 240, 24, code == 1 ? GRN : RED);
 }
 static void ota_commit(const uint8_t *parm)
 {
@@ -198,7 +145,7 @@ static void ota_commit(const uint8_t *parm)
 static void fm1_fault(const fm1_crash_t *c)
 {
     (void)c;
-    lcd_rect(0, 0, 240, 240, RED);
+    fm1_lcd_fill_rect(0, 0, 240, 240, RED);
     fm1_delay_ms(1500);
     fm1_reboot();
 }
@@ -213,17 +160,17 @@ static void fm1_fault(const fm1_crash_t *c)
 static void draw_static(void)
 {
     uint32_t i;
-    lcd_rect(0, 0, 240, 240, BLK);
+    fm1_lcd_fill_rect(0, 0, 240, 240, BLK);
     for (i = 0; i < 6; i++) {                   /* colour bars: R G B white yellow cyan */
         static const uint16_t bars[6] = { RED, GRN, BLU, WHT, YEL, CYN };
-        lcd_rect(i * 40u, 0, 40, 20, bars[i]);
+        fm1_lcd_fill_rect(i * 40u, 0, 40, 20, bars[i]);
     }
     for (i = 0; i < 14; i++)
-        lcd_rect(BTN_X(i), BTN_Y(i), 30, 22, DIM);
+        fm1_lcd_fill_rect(BTN_X(i), BTN_Y(i), 30, 22, DIM);
     for (i = 0; i < 27; i++)
-        lcd_rect(KEY_X(i), KEY_Y(i), 24, 20, DIM);
+        fm1_lcd_fill_rect(KEY_X(i), KEY_Y(i), 24, 20, DIM);
     for (i = 0; i < 7; i++)
-        lcd_rect(ENC_X(i), 72, 30, 22, DIM);
+        fm1_lcd_fill_rect(ENC_X(i), 72, 30, 22, DIM);
 }
 
 /* v 0..1023 over 232 px, drawn when its width changes, each part once (lit, then the rest dim): painting the whole
@@ -235,9 +182,9 @@ static void draw_bar(uint32_t y, int32_t v, uint16_t col, uint32_t *shown)
         return;
     *shown = w;
     if (w)
-        lcd_rect(4, y, w, 12, col);
+        fm1_lcd_fill_rect(4, y, w, 12, col);
     if (w < 232u)
-        lcd_rect(4u + w, y, 232u - w, 12, DIM);
+        fm1_lcd_fill_rect(4u + w, y, 232u - w, 12, DIM);
 }
 
 /* ---- serial console ---- */
@@ -390,7 +337,7 @@ static void app_main(void)
         if (flash_ok)
             ota_boot_cleanup();                 /* what an interrupted update left behind */
     }
-    lcd_init();
+    fm1_lcd_init();
     draw_static();
     fm1_input_init();
     fm1_adc_init();
@@ -400,7 +347,7 @@ static void app_main(void)
     fm1_irq_enable_all();
     fm1_lcd_backlight(1);
     if (fm1_crash.magic == FM1_CRASH_MAGIC)     /* orange mark: the last run crashed ('c' has the details) */
-        lcd_rect(200, 228, 24, 10, YEL);
+        fm1_lcd_fill_rect(200, 228, 24, 10, YEL);
     walk_until = 41u * 60u;
     for (;;) {
         uint32_t now = ms;
@@ -435,8 +382,8 @@ static void app_main(void)
             int32_t s = fm1_enc_take(i);
             if (s) {
                 enc_pos[i] += s;
-                lcd_rect(ENC_X(i), 72, 30, 22, s > 0 ? GRN : RED);
-                lcd_rect(ENC_X(i) + 2u, 90, (uint32_t)(enc_pos[i] & 15) * 28u / 15u + 1u, 2, WHT);
+                fm1_lcd_fill_rect(ENC_X(i), 72, 30, 22, s > 0 ? GRN : RED);
+                fm1_lcd_fill_rect(ENC_X(i) + 2u, 90, (uint32_t)(enc_pos[i] & 15) * 28u / 15u + 1u, 2, WHT);
                 shown_enc |= 1u << i;
             }
         }
@@ -444,14 +391,14 @@ static void app_main(void)
             uint32_t d = shown_btn ^ fm1_in.buttons;
             for (i = 0; i < 14; i++)
                 if (d & (1u << i))
-                    lcd_rect(BTN_X(i), BTN_Y(i), 30, 22, (fm1_in.buttons >> i) & 1u ? WHT : DIM);
+                    fm1_lcd_fill_rect(BTN_X(i), BTN_Y(i), 30, 22, (fm1_in.buttons >> i) & 1u ? WHT : DIM);
             shown_btn = fm1_in.buttons;
         }
         if (shown_keys != fm1_in.notes) {
             uint32_t d = shown_keys ^ fm1_in.notes;
             for (i = 0; i < 27; i++)
                 if (d & (1u << i))
-                    lcd_rect(KEY_X(i), KEY_Y(i), 24, 20, (fm1_in.notes >> i) & 1u ? CYN : DIM);
+                    fm1_lcd_fill_rect(KEY_X(i), KEY_Y(i), 24, 20, (fm1_in.notes >> i) & 1u ? CYN : DIM);
             shown_keys = fm1_in.notes;
         }
         if (now < walk_until) {                 /* walk: one LED at a time, then back to key = LED */
@@ -473,7 +420,7 @@ static void app_main(void)
             last_status = now;
             status(knob, batt);
         }
-        lcd_rect(232, 232, 8, 8, usb.config ? ((now >> 9) & 1u ? GRN : DIM) : RED);   /* USB + heartbeat */
+        fm1_lcd_fill_rect(232, 232, 8, 8, usb.config ? ((now >> 9) & 1u ? GRN : DIM) : RED);   /* USB + heartbeat */
         (void)shown_enc;
     }
 }
