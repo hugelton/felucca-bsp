@@ -34,10 +34,13 @@ About 9 KB each. The toolchain is JieLi's own (see Felucca's `tools/get_toolchai
 
 ## Install
 
-Build the loader (`loader/`, see the README), then pack and install with the tools in this repository:
+The package needs the update loader as `ota.bin`: `loader/` built and wrapped (its heads and LZ4 blocks, as the
+SPL loads it). This repository has the loader's source but no script that builds it; fm1-base's `tools/build.py` does
+(`APP/build/loader/ota.bin`, for any app it builds). The raw `loader.bin` is not a loader package entry: M-VAVE's
+updater stops on it before writing anything. Then pack and install with the tools in this repository:
 
     tools/get_sdk.sh                                  # JieLi's SDK, fetched from JieLi, checked by hash (~0.5 GB)
-    AC79_SDK=~/.jieli/ac79-sdk python3 tools/fm1pkg.py hwtest.bin loader.bin hwtest.fwsc --product FM-1_1200     # hwtest-exp: FM-1_1210
+    AC79_SDK=~/.jieli/ac79-sdk python3 tools/fm1pkg.py hwtest.bin ota.bin hwtest.fwsc --product FM-1_1200     # hwtest-exp: FM-1_1210
     python3 tools/fm1_install.py hwtest.fwsc          # needs mido and python-rtmidi
 
 `fm1pkg.py` takes three small files from the JieLi AC79 SDK (Apache-2.0) and puts them in the package.
