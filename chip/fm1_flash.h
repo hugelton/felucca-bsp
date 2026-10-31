@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+ * Copyright (c) 2026 Julius Vitkauskas (busy-safe completion, optional flash-window hooks)
  * Written against the public JieLi AC79 SDK (Apache-2.0); see NOTICE. */
 /* FM-1 SPI NOR at runtime: erase / program / read. Used only when
  * FELUCCA_FLASH is 1.
@@ -9,6 +10,15 @@
  * libcalls, no XIP-resident helpers. Call the fl_*_ram() entry points with
  * interrupts disabled. Same sequence as the AC79 SDK flash driver
  * (cpu.a/vm_sfc.c.o: enter_spi_code, norflash_erase, norflash_wait_ok, exit_spi_code).
+ *
+ * An erase or program never returns to XIP while the part still reports BUSY
+ * (fl_wait_issued, fm1_flash_wait.h): it polls past the normal bound and, if the
+ * part is still busy at the extended bound, resets the chip from RAM.
+ *
+ * Optional, all off unless the including firmware defines them first (nothing
+ * of them is compiled otherwise): FL_IRQ_MASK_LEVEL (which interrupts the
+ * fl_erase4k / fl_write window holds off), FL_CAN_START() (may this erase or
+ * page program start now?) and FL_ERR_LATE_READY (the code for a late finish).
  */
 #pragma once
 #include <stdint.h>
@@ -153,6 +163,14 @@ RAMINL int fl_wait_ready(uint32_t max_us, uint32_t *took_us)
         if (dt > max_us) { *took_us = dt; return -4; }
     }
 }
+/* A part still busy at the extended bound: reset the chip (PWR_CON core reset, as fm1_irq.h's fault-in-fault), from
+ * RAM, never through XIP */
+RAMINL void fl_reset_busy(void)
+{
+    REG32(0x10000u) |= 1u << 4;
+    for (;;) ;
+}
+#include "fm1_flash_wait.h"                       /* fl_wait_issued: shared with the host model (tests/) */
 
 /* ---- entry points: IRQs OFF, args/buffers in RAM ---- */
 
@@ -202,9 +220,10 @@ static RAMFN int fl_erase4k_ram(uint32_t off, uint32_t *took_us)
     fl_wren();
     if (!(fl_rdsr(0x05) & 2u)) rc = -3;           /* WEL did not set */
     else {
+        uint32_t issued = T4_CNT;
         fl_cs(0); fl_tx(0x20); fl_addr(off); fl_cs(1);
         fl_inval(off, 4096u);
-        rc = fl_wait_ready(500000u, took_us);     /* generic NOR max 400 ms */
+        rc = fl_wait_issued(issued, 500000u, 2000000u, took_us);   /* generic NOR max 400 ms */
     }
     fl_exit(&s);
     return rc;
@@ -219,11 +238,12 @@ static RAMFN int fl_prog_ram(uint32_t off, const uint8_t *src, uint32_t n, uint3
     fl_wren();
     if (!(fl_rdsr(0x05) & 2u)) rc = -3;
     else {
+        uint32_t issued = T4_CNT;
         fl_cs(0); fl_tx(0x02); fl_addr(off);
         for (i = 0; i < n; i++) fl_tx(src[i]);
         fl_cs(1);
         fl_inval(off, n);
-        rc = fl_wait_ready(10000u, took_us);      /* generic NOR max 3 ms */
+        rc = fl_wait_issued(issued, 10000u, 50000u, took_us);      /* generic NOR max 3 ms */
     }
     fl_exit(&s);
     return rc;
@@ -255,12 +275,55 @@ static void fl_plain_window_init(void)
     __asm__ volatile("csync\n\tsti" ::: "memory");
 }
 
+/* The interrupt window of fl_erase4k / fl_write (and of other callers of irq_save / irq_restore).
+ * FL_IRQ_MASK_LEVEL: the highest interrupt priority (0..7, fm1_irq_attach) held off while XIP is off.
+ *   7 (default, also when undefined): cli ... csync; sti, everything held off. As before this option existed: restore
+ *     always ends with sti (it does not nest).
+ *   6: clear ICFG bit 8 (the gate fm1_irq_enable_all sets; what the AC79 SDK's local_irq_save clears) and give the
+ *     saved ICFG back on restore (nests). Sources at priority 7 are still taken. fm1_irq_init puts only the CPU
+ *     exception there, whose handler (fm1_vec.S, fm1_fault_c) runs from XIP: a firmware that selects 6 makes sure that
+ *     everything it puts at priority 7, its wrapper, body, callees, constants and data included, lives in RAM and never
+ *     touches XIP or the flash, since XIP is off for up to the extended bound of fl_wait_issued.
+ * Either way the second core must stay in RAM (or stopped) for the whole window. Other values are an error. */
+#ifndef FL_IRQ_MASK_LEVEL
+#define FL_IRQ_MASK_LEVEL 7
+#endif
+#if FL_IRQ_MASK_LEVEL == 7
 static inline uint32_t irq_save(void) { __asm__ volatile("cli" ::: "memory"); return 0; }
 static inline void irq_restore(uint32_t f) { (void)f; __asm__ volatile("csync\n\tsti" ::: "memory"); }
+#elif FL_IRQ_MASK_LEVEL == 6
+static inline uint32_t irq_save(void)
+{
+    uint32_t f;
+    __asm__ volatile("%0 = icfg" : "=r"(f));
+    __asm__ volatile("icfg = %0" :: "r"(f & ~0x100u) : "memory");
+    __asm__ volatile("csync" ::: "memory");
+    return f;
+}
+static inline void irq_restore(uint32_t f)
+{
+    __asm__ volatile("csync" ::: "memory");
+    __asm__ volatile("icfg = %0" :: "r"(f) : "memory");
+}
+#else
+#error "FL_IRQ_MASK_LEVEL: 7 (cli, the default) or 6 (ICFG bit 8; priority 7 stays enabled)"
+#endif
+
+/* FL_CAN_START(): optional, function-like, defined (with what it calls declared) before this header is included.
+ * fl_erase4k and fl_write evaluate it once per sector erase and once per page program, inside the interrupt window
+ * (after irq_save, before the RAM driver turns XIP off); 0 refuses: nothing is sent to the part, the window closes and
+ * the call returns FL_ERR_REFUSED (fl_write: the pages before stay written). It runs from XIP with the window's
+ * interrupts held off: it must not open them, and every interrupt that can change its answer must be one the window
+ * holds off. Not defined: no call, branch or symbol. fl_erase4k_ram / fl_prog_ram, called directly (the update
+ * loader, with interrupts off throughout), do not consult it. */
+#define FL_ERR_REFUSED (-8)
 
 static int fl_erase4k(uint32_t off, uint32_t *took_us)
 {
     uint32_t f = irq_save();
+#ifdef FL_CAN_START
+    if (!FL_CAN_START()) { irq_restore(f); return FL_ERR_REFUSED; }
+#endif
     int rc = FL_FAR(fl_erase4k_ram)(off, took_us);
     irq_restore(f);
     return rc;
@@ -275,6 +338,9 @@ static int fl_write(uint32_t off, const uint8_t *src_ram, uint32_t n)
         uint32_t f;
         if (chunk > n) chunk = n;
         f = irq_save();
+#ifdef FL_CAN_START
+        if (!FL_CAN_START()) { irq_restore(f); return FL_ERR_REFUSED; }
+#endif
         rc = FL_FAR(fl_prog_ram)(off, src_ram, chunk, &took);
         irq_restore(f);
         if (rc) return rc;

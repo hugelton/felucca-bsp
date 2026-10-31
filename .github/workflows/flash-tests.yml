@@ -1,0 +1,19 @@
+name: Flash driver tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  flash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Erase/program completion model, optional flash and ISR hooks off by default
+        env:
+          CC: clang
+        run: |
+          "$CC" -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=address,undefined \
+              -o "$RUNNER_TEMP/flash_wait_test" tests/flash_wait_test.c
+          "$RUNNER_TEMP/flash_wait_test"
+          python3 tests/flash_hooks_test.py
