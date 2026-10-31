@@ -367,7 +367,8 @@ static void usb_host_task(uint32_t now)
 #endif
 #if FELUCCA_OTA
             so_r = so_w;
-            sx_collect = sx_ready = sx_busy = 0;
+            sx_collect = sx_busy = 0;
+            sx_taken = sx_made;                         /* (the frames waiting: dropped) */
 #endif
 #if FELUCCA_MIRROR
             mr_r = mr_w;
