@@ -215,13 +215,26 @@ static struct {
 } usb;
 
 #if FELUCCA_OTA
-/* M-UPGRADE SysEx (ota.c): one received frame at a time (7-bit bytes between
- * F0 and F7; frames arriving while one is pending are dropped, the host
- * retries), and a TX ring of SysEx event packets sent before any MIDI. */
-static uint8_t sx_frame[640];
-static uint32_t sx_pos;
-static volatile uint32_t sx_frame_len;
-static volatile uint8_t sx_ready, sx_collect, sx_busy;
+/* M-UPGRADE SysEx (ota.c): the received frames (7-bit bytes between F0 and
+ * F7) queued for the main loop, and a TX ring of SysEx event packets sent
+ * before any MIDI. The queue: each frame its length (2 bytes, little-endian)
+ * and its bytes, one after another; a frame that would run past the end goes
+ * to the start instead (a length of 0 left where it would have been, or no
+ * room for one: the reader goes on from the start), and one arriving when none
+ * waits starts the buffer over (sx_epoch moves: the reader too), so a frame of
+ * FELUCCA_SX_IN - 2 bytes always fits then. A frame with no room is dropped
+ * (the host retries). The ISR writes and counts sx_made; the main loop reads
+ * and counts sx_taken (sx_r, sx_ep its own). */
+#ifndef FELUCCA_SX_IN
+#define FELUCCA_SX_IN 648u                        /* an M-UPGRADE frame (640) whole; shorter ones several at once */
+#endif
+static uint8_t sx_frame[FELUCCA_SX_IN];
+static uint32_t sx_pos, sx_at, sx_top, sx_w;      /* the ISR's: the frame's bytes so far, where they go, where it
+                                                   * started (its length's place), where the next goes */
+static uint8_t sx_from0, sx_moved;                /* it starts the buffer over; it went to the start */
+static volatile uint32_t sx_made, sx_taken, sx_r; /* frames queued, taken; the oldest's place (the reader's) */
+static volatile uint8_t sx_epoch, sx_ep;          /* the buffer started over (the ISR's), seen (the reader's) */
+static volatile uint8_t sx_collect, sx_busy;
 #ifndef SXQ
 #define SXQ 64u                                   /* a firmware may give it more (a long screen-reader message whole) */
 #endif
@@ -937,6 +950,80 @@ stall:
     sie_wr(S_CSR0, 0x60);
 }
 
+#if FELUCCA_OTA
+static void sx_start(void)                         /* F0: a frame's place (see sx_frame) */
+{
+    sx_pos = 0;
+    sx_from0 = sx_made == sx_taken;
+    sx_moved = 0;
+    sx_top = sx_from0 ? 0u : sx_w;
+    sx_at = sx_top + 2u;
+    sx_collect = 1;
+}
+static void sx_over(int from0)                     /* the frame so far to the start: the buffer over (none waits) or
+                                                   * past the end (the oldest leaves room there) */
+{
+    uint32_t i;
+    for (i = 0; i < sx_pos; i++)
+        sx_frame[2u + i] = sx_frame[sx_at + i];
+    sx_at = 2u;
+    sx_from0 = (uint8_t)from0;
+    sx_moved = (uint8_t)!from0;
+}
+static int sx_room(void)                           /* room for the frame's next byte (moved to the start if need be) */
+{
+    uint32_t r;
+    if (sx_from0)
+        return sx_at + sx_pos < FELUCCA_SX_IN;
+    r = sx_ep != sx_epoch ? 0u : sx_r;            /* (the reader's place: 0 once it sees the buffer started over) */
+    if (sx_moved || sx_top < r) {                  /* before the oldest: up to it, a byte short (full never meets it) */
+        if (sx_at + sx_pos + 1u < r)
+            return 1;
+    } else {
+        if (sx_at + sx_pos < FELUCCA_SX_IN)
+            return 1;
+        if (2u + sx_pos + 1u < r) {                /* past the end: to the start, if the oldest leaves room there */
+            sx_over(0);
+            return 1;
+        }
+    }
+    if (sx_made != sx_taken)
+        return 0;
+    sx_over(1);                                    /* none waits now: the buffer starts over with it */
+    return sx_at + sx_pos < FELUCCA_SX_IN;
+}
+/* room for a packet's k bytes after the frame's (the next frame's too, its length before them, in place or at the
+ * start), or none waits (nothing to wait for: a frame now starts the buffer over, moved there if it's in the way of
+ * the next, or is too long and dropped); ep1_take leaves a packet until then */
+static int sx_fits(uint32_t k)
+{
+    uint32_t r, top = sx_collect ? sx_top : sx_w, end = sx_collect ? sx_at + sx_pos : sx_w + 2u, here;
+    if (sx_collect && sx_from0)
+        return 1;
+    r = sx_ep != sx_epoch ? 0u : sx_r;
+    end += k + 2u;
+    here = (sx_collect && sx_moved) || top < r ? end < r : end <= FELUCCA_SX_IN;
+    if (sx_made == sx_taken) {
+        if (sx_collect && !here)
+            sx_over(1);
+        return 1;
+    }
+    return here || (!(sx_collect && sx_moved) && top >= r && 2u + (sx_collect ? sx_pos : 0u) + k + 2u < r);
+}
+static void sx_queue(void)                         /* F7: the frame to the main loop */
+{
+    sx_frame[sx_at - 2u] = (uint8_t)sx_pos;
+    sx_frame[sx_at - 1u] = (uint8_t)(sx_pos >> 8);
+    if (sx_moved && sx_top + 2u <= FELUCCA_SX_IN)
+        sx_frame[sx_top] = sx_frame[sx_top + 1u] = 0;   /* (the reader: on from the start) */
+    sx_w = sx_at + sx_pos;
+    if (sx_from0)
+        sx_epoch++;
+    RING_PUBLISH();
+    sx_made++;
+}
+#endif
+
 /* SysEx assembly: only short commands matter here */
 static void sysex_byte(uint8_t b)
 {
@@ -954,18 +1041,17 @@ static void sysex_byte(uint8_t b)
         usb.sx_on = 1;
         usb.sx_len = 0;
 #if FELUCCA_OTA
-        sx_collect = !sx_ready;
-        sx_pos = 0;
+        sx_start();
 #endif
     }
     if (!usb.sx_on)
         return;
 #if FELUCCA_OTA
     if (sx_collect && b != 0xF0 && b != 0xF7) {
-        if (sx_pos < sizeof sx_frame)
-            sx_frame[sx_pos++] = b;
+        if (sx_room())
+            sx_frame[sx_at + sx_pos++] = b;
         else
-            sx_collect = 0;                             /* too long: not ours */
+            sx_collect = 0;                             /* too long, or no room: dropped */
     }
 #endif
     if (usb.sx_len < sizeof usb.sysex)
@@ -980,11 +1066,8 @@ static void sysex_byte(uint8_t b)
         else if (usb.sx_len == 6u && usb.sysex[1] == 0x22 && usb.sysex[2] == 0x24 && usb.sysex[3] == 0x35 &&
                  usb.sysex[4] == 0x7F)
             usb.ota_req = 1;
-        else if (sx_collect && sx_pos) {
-            sx_frame_len = sx_pos;
-            RING_PUBLISH();
-            sx_ready = 1;                               /* main loop: ota_take() / ed_service() */
-        }
+        else if (sx_collect && sx_pos)
+            sx_queue();                                 /* main loop: ota_take() / ed_service() */
         sx_collect = 0;
 #endif
         usb.sx_on = 0;
@@ -1019,13 +1102,19 @@ static void midi_in_event(uint32_t pkt)                 /* one USB-MIDI event pa
 /* one EP1 OUT packet (<= 16 events) into the MIDI ring, or 0: fewer than 16 + 8 slots free, so the packet
  * stays (the host is NAKed) and is retried next poll; a burst never overflows the ring (that panics), and
  * 8 slots stay for TRS MIDI, which shares the ring and cannot wait (31250 baud: about 3 messages a half).
- * The update loader never drains the ring (it wants SysEx only): no back-pressure there. */
+ * The update loader never drains the ring (it wants SysEx only): no back-pressure there. The same for SysEx:
+ * the packet stays while the frames waiting leave no room for its bytes (16 x 3), so frames sent back to back
+ * (a bank of dumps) are none of them lost. */
 #define EP1_ROOM (16u + 8u)
 static int ep1_take(const uint8_t *b, uint32_t n)
 {
     uint32_t i;
 #ifndef FELUCCA_LOADER
     if (MQ - (mi_w - mi_r) < EP1_ROOM)
+        return 0;
+#endif
+#if FELUCCA_OTA
+    if (!sx_fits(48u))
         return 0;
 #endif
     for (i = 0; i + 3u < n; i += 4u)
@@ -1095,19 +1184,28 @@ static int ota_wire_send(const uint8_t *p, uint32_t n)   /* F0..F7 -> USB-MIDI S
     sx_busy = 0;
     return 0;
 }
-static int ota_frame_get(const uint8_t **p, uint32_t *n)
+static int ota_frame_get(const uint8_t **p, uint32_t *n)   /* the oldest frame (the same until ota_frame_done) */
 {
-    if (!sx_ready)
+    uint32_t r;
+    if (sx_made == sx_taken)
         return 0;
-    RING_PUBLISH();                                     /* read the frame only after the flag */
-    *p = sx_frame;
-    *n = sx_frame_len;
+    RING_PUBLISH();                                     /* read the frame only after the count */
+    r = sx_ep != sx_epoch ? 0u : sx_r;                  /* (the epoch holds while a frame waits) */
+    if (r + 2u > FELUCCA_SX_IN || !(sx_frame[r] | sx_frame[r + 1u]))
+        r = 0;                                          /* no frame here: on from the start */
+    sx_r = r;                                           /* (before sx_ep: the ISR sees 0 either way) */
+    sx_ep = sx_epoch;
+    *p = sx_frame + r + 2u;
+    *n = sx_frame[r] | (uint32_t)sx_frame[r + 1u] << 8;
     return 1;
 }
 static void ota_frame_done(void)
 {
-    RING_PUBLISH();                                     /* done with the frame before the ISR may refill it */
-    sx_ready = 0;
+    uint32_t r = sx_r;
+    r += 2u + (sx_frame[r] | (uint32_t)sx_frame[r + 1u] << 8);
+    RING_PUBLISH();                                     /* done with the frame before the ISR may reuse it */
+    sx_r = r;
+    sx_taken++;
 }
 #endif
 
