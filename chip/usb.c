@@ -535,7 +535,9 @@ static int get_desc(uint32_t wvalue, const uint8_t **d, uint16_t *l)
 }
 
 /* ---------------------------------------------------------- the SIE --- */
-static void sie_wr(uint32_t r, uint32_t v)
+/* out of line on purpose (felucca-bsp#14): inlined at -O2, back-to-back SIE accesses ran a few cycles apart and EP1 IN
+ * stopped on the FM-1 (built at -O2 -mcpu=r3); as calls they keep the spacing every build has been tested with */
+static __attribute__((noinline)) void sie_wr(uint32_t r, uint32_t v)
 {
     uint32_t n = 20000;
     if (!fm1_usb_sie_on())
@@ -549,7 +551,7 @@ static void sie_wr(uint32_t r, uint32_t v)
         usb.up = 0;                                     /* SIE dead (no clock?): stop polling it */
 }
 
-static uint32_t sie_rd(uint32_t r)
+static __attribute__((noinline)) uint32_t sie_rd(uint32_t r)
 {
     uint32_t n = 20000;
     if (!fm1_usb_sie_on())
@@ -1283,6 +1285,12 @@ static inline int32_t uac_s16(int32_t v)
 static inline int32_t uac_in16(int32_t v) { return uac_s16((v + 128) >> 8); }
 
 #if FELUCCA_UAC_48K
+/* one tap into a sum, out of line and in registers only (docs/CPU.md: 64-bit multiplies inlined among loads, the
+ * history's 16-bit ones above all, are what fails on the FM-1; here nothing is loaded and the product is used at once) */
+static __attribute__((noinline)) int64_t uac_mac48(int64_t a, int32_t t, int32_t x)
+{
+    return a + (int64_t)t * x;
+}
 /* 44.1 -> 48 kHz (x 160 / 147), one block: each input frame enters the history, then the 1 or 2 output
  * frames whose newest input it is: phase ph, the window of UAC_FIR_N frames ending at it, the taps of
  * phase ph (or of 159 - ph backwards: the prototype is symmetric), Q30 into 64-bit sums. */
@@ -1308,15 +1316,15 @@ static __attribute__((noinline)) void uac_tap48(const int32_t *out, uint32_t n)
                 const int32_t *c = UAC_FIR[ph];
                 for (j = UAC_FIR_N; j; j--, x++) {
                     int32_t t = *c++;
-                    al += (int64_t)t * x[0];
-                    ar += (int64_t)t * x[2u * RS_H];
+                    al = uac_mac48(al, t, x[0]);
+                    ar = uac_mac48(ar, t, x[2u * RS_H]);
                 }
             } else {
                 const int32_t *c = &UAC_FIR[UAC_FIR_L - 1u - ph][UAC_FIR_N - 1u];
                 for (j = UAC_FIR_N; j; j--, x++) {
                     int32_t t = *c--;
-                    al += (int64_t)t * x[0];
-                    ar += (int64_t)t * x[2u * RS_H];
+                    al = uac_mac48(al, t, x[0]);
+                    ar = uac_mac48(ar, t, x[2u * RS_H]);
                 }
             }
             yl = uac_s16((int32_t)((al + (1 << (UAC_FIR_Q - 1))) >> UAC_FIR_Q));

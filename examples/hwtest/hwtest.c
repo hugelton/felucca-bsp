@@ -66,7 +66,10 @@ static void cpu1_job(uint32_t n)                    /* runs on the second core, 
 }
 #endif
 static uint32_t boots_ok;
-static struct { uint32_t magic, pending, failed; } guard __attribute__((section(".noinit")));
+/* volatile (felucca-bsp#17): a static the compiler sees only ever given the magic took it as zero at start, shrank
+ * magic and pending to 1-bit flags and dropped the compare, so what the stock firmware left in RAM passed for a
+ * record and the first boot after an install landed in UBOOT */
+static volatile struct { uint32_t magic, pending, failed; } guard __attribute__((section(".noinit")));
 void fm1_alnk0_irq(void) {}                     /* isr_alnk0 is linked but no audio runs */
 
 void fm1_timer5_irq(void)                       /* 10 kHz: key scan, ms, USB at 2 kHz */
@@ -483,7 +486,7 @@ void fm1_cstart(void)
     uint32_t *s, *d;
     fm1_time_init();
     fm1_wdt_arm(0x0D);
-    if (guard.magic != 0x48575431u) {
+    if (guard.magic != 0x48575431u || guard.pending > 1u || guard.failed > 1u) {   /* they only ever hold 0 or 1 */
         guard.magic = 0x48575431u;
         guard.failed = 0;
         guard.pending = 0;
