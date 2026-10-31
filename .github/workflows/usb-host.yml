@@ -13,3 +13,5 @@ jobs:
         env:
           CC: clang
         run: tests/run_usb_host_tests.sh
+      - name: Rescue tool's write policy
+        run: python3 tests/rescue_test.py
