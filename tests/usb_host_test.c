@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
@@ -317,22 +318,290 @@ static void fm1_delay_ms(uint32_t ms) { (void)ms; }
 #define fm1_usb_sof_take mock_zero
 #define fm1_wdt_feed() (fm1_ms++)                       /* the host code's waits run on this clock */
 #define RING_PUBLISH() ((void)0)
-#define FELUCCA_UAC TEST_UAC
-#define FELUCCA_CDC 1
-#define FELUCCA_OTA 0
-#define FELUCCA_USB_HOST TEST_HOST
 #ifndef TEST_UAC
 #define TEST_UAC 0
 #endif
 #ifndef TEST_HOST
 #define TEST_HOST 1
 #endif
-#define FELUCCA_UAC_48K 0
-#define FELUCCA_UAC_OUT TEST_UAC
+#ifndef TEST_CDC
+#define TEST_CDC 1
+#endif
+#ifndef TEST_48K
+#define TEST_48K 0
+#endif
+#ifndef TEST_OUT
+#define TEST_OUT TEST_UAC
+#endif
+#define FELUCCA_UAC TEST_UAC
+#define FELUCCA_CDC TEST_CDC
+#define FELUCCA_OTA 0
+#define FELUCCA_USB_HOST TEST_HOST
+#define FELUCCA_UAC_48K TEST_48K
+#define FELUCCA_UAC_OUT TEST_OUT
 #define HALF_FRAMES 128u
 static volatile uint32_t render_peak;
 static volatile uint8_t render_busy;
 #include "../chip/usb.c"
+
+/* ------------------------------------------- the device's descriptors --- */
+/* The configuration descriptor read as a host reads it: the interfaces in order, the audio control header's
+ * collection, the endpoints, the IADs; then SET_INTERFACE through ep0_service, as the host sends it. Built in every
+ * option set (run_usb_host_tests.sh); TEST_GOLDEN_PLAIN / TEST_GOLDEN_CDC hold the CRC-32 of the device +
+ * configuration descriptors as the bsp built them before FELUCCA_UAC_MIDI_LAST, for the option sets that existed. */
+#ifndef FELUCCA_UAC_MIDI_LAST
+#define FELUCCA_UAC_MIDI_LAST 0
+#endif
+#ifndef FELUCCA_UAC_IAD
+#define FELUCCA_UAC_IAD 0
+#endif
+typedef struct {
+    uint8_t num, cls, sub, alts, nep[2], ep[2][2];
+} t_if;
+enum { T_AC, T_AS, T_ASO, T_MIDI, T_COMM, T_DATA };
+static uint32_t t_crc32(uint32_t c, const uint8_t *p, uint32_t n)
+{
+    c = ~c;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; k++)
+            c = c >> 1 ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return ~c;
+}
+static uint8_t t_role(const t_if *f)
+{
+    if (f->cls == 1)
+        return f->sub == 1 ? T_AC : f->sub == 3 ? T_MIDI : f->ep[1][0] == 0x84 ? T_AS : T_ASO;
+    return f->cls == 2 ? T_COMM : T_DATA;
+}
+static const char *T_NAME[] = {"AC", "AS in", "AS out", "MIDI", "CDC comm", "CDC data"};
+
+static void t_setup(uint8_t rt, uint8_t rq, uint16_t val, uint16_t idx, uint16_t len)
+{
+    const uint8_t s[8] = {rt, rq, (uint8_t)val, (uint8_t)(val >> 8), (uint8_t)idx, (uint8_t)(idx >> 8),
+                          (uint8_t)len, (uint8_t)(len >> 8)};
+    memcpy(ep0buf, s, 8);
+    usb.e0_tx = 0;
+    sie_wr(S_INDEX, 0);
+    regs[0][17] = 0x01;                                 /* RxPktRdy: a SETUP waits */
+    ep0_service();
+}
+static int t_acked(void) { return regs[0][17] == 0x48; }
+
+/* one presentation: the device + configuration descriptors as get_desc gives them; returns their CRC-32 */
+static uint32_t check_descriptors(int cdc_on, int verbose)
+{
+    const uint8_t *dv, *c;
+    uint16_t dl, cl;
+    t_if f[8];
+    uint8_t nf = 0, coll[4] = {0}, ncoll = 0, iad[3][2], niad = 0, iad_at[3], ac_cs = 0, i;
+    uint16_t ac_total = 0, ac_sum = 0;
+    int in_ac = 0;
+#if FELUCCA_CDC
+    usb_cdc_on = (uint8_t)cdc_on;
+#endif
+    assert(get_desc(0x0100, &dv, &dl) && dl == 18 && dv[0] == 18 && dv[1] == 1);
+    assert(get_desc(0x0200, &c, &cl) && c[1] == 2);
+    assert((c[2] | c[3] << 8) == cl);                   /* wTotalLength: the whole descriptor */
+    memset(f, 0, sizeof f);
+    for (uint32_t p = c[0]; p < cl; p += c[p]) {
+        const uint8_t *d = c + p;
+        assert(d[0] >= 2 && p + d[0] <= cl);
+        if (d[1] == 4) {                                /* interface */
+            in_ac = d[5] == 1 && d[6] == 1;
+            if (d[3] == 0) {
+                assert(nf < 8 && d[2] == nf);           /* numbered 0.. in the order they come */
+                f[nf].num = d[2];
+                f[nf].cls = d[5];
+                f[nf].sub = d[6];
+                nf++;
+            } else
+                assert(nf && d[2] == f[nf - 1].num && d[3] == f[nf - 1].alts + 1u);
+            f[nf - 1].alts = d[3];
+        } else if (d[1] == 5) {                         /* endpoint, of the interface setting before it */
+            t_if *g = &f[nf - 1];
+            uint8_t a = g->alts > 1 ? 1 : g->alts;
+            assert(g->nep[a] < 2);
+            g->ep[a][g->nep[a]++] = d[2];
+        } else if (d[1] == 0x0B) {                      /* IAD: before the first interface it groups */
+            assert(niad < 3 && d[0] == 8 && d[2] == nf);
+            iad[niad][0] = d[2];
+            iad[niad][1] = d[3];
+            iad_at[niad++] = d[4];
+        } else if (d[1] == 0x24 && in_ac) {             /* class-specific audio control */
+            if (d[2] == 1) {
+                ac_total = (uint16_t)(d[5] | d[6] << 8);
+                ncoll = d[7];
+                assert(d[0] == 8 + ncoll && ncoll <= 4);
+                memcpy(coll, d + 8, ncoll);
+            }
+            ac_sum = (uint16_t)(ac_sum + d[0]);
+            ac_cs++;
+        }
+    }
+    assert(c[4] == nf && ac_cs && ac_total == ac_sum);
+
+    /* what it should be, written out independently of the descriptor macros */
+    const int has_uac = FELUCCA_UAC, out = FELUCCA_UAC_OUT, ml = FELUCCA_UAC_MIDI_LAST, nas = has_uac + out;
+    const int as_first = FELUCCA_UAC_AS_FIRST && !ml;
+    const int cdc_first = cdc_on && FELUCCA_USB_LAYOUT == 1;
+    uint8_t want[8], nw = 0, aud;
+    if (cdc_first) {
+        want[nw++] = T_COMM;
+        want[nw++] = T_DATA;
+    }
+    aud = nw;
+    want[nw++] = T_AC;
+    if (!ml)
+        want[nw++] = T_MIDI;
+    for (i = 0; i < nas; i++)
+        want[nw++] = (uint8_t)(i ? T_ASO : T_AS);
+    if (ml)
+        want[nw++] = T_MIDI;
+    if (cdc_on && !cdc_first) {
+        want[nw++] = T_COMM;
+        want[nw++] = T_DATA;
+    }
+    assert(nf == nw);
+    for (i = 0; i < nf; i++)
+        assert(t_role(&f[i]) == want[i]);
+    if (verbose) {
+        printf("  %s: interfaces", cdc_on ? "with the console" : "plain");
+        for (i = 0; i < nf; i++)
+            printf(" %u %s%s", f[i].num, T_NAME[t_role(&f[i])], i + 1 < nf ? "," : "");
+        printf("; AC collection");
+        for (i = 0; i < ncoll; i++)
+            printf(" %u", coll[i]);
+        printf("; %u bytes, bcdDevice %02X.%02X\n", cl, dv[13], dv[12]);
+    }
+    /* the collection: the audio function's streaming interfaces and MIDI, in the order the option asks */
+    {
+        uint8_t wc[4], nwc = 0, midi = 0, as0 = 0;
+        for (i = 0; i < nf; i++) {
+            if (want[i] == T_MIDI)
+                midi = i;
+            if (want[i] == T_AS && !as0)
+                as0 = i;
+        }
+        if (!has_uac)
+            wc[nwc++] = midi;
+        else if (ml == 2)
+            for (i = 0; i < nas; i++)
+                wc[nwc++] = (uint8_t)(as0 + i);
+        else if (ml || as_first) {
+            for (i = 0; i < nas; i++)
+                wc[nwc++] = (uint8_t)(as0 + i);
+            wc[nwc++] = midi;
+        } else {
+            wc[nwc++] = midi;
+            for (i = 0; i < nas; i++)
+                wc[nwc++] = (uint8_t)(as0 + i);
+        }
+        assert(ncoll == nwc && !memcmp(coll, wc, nwc));
+        assert(ac_total == (has_uac ? (out ? 53 : 31) - (ml == 2) : 9));
+    }
+    /* the endpoints never move */
+    for (i = 0; i < nf; i++) {
+        const t_if *g = &f[i];
+        switch (want[i]) {
+        case T_AC: assert(g->alts == 0 && g->nep[0] == 0); break;
+        case T_MIDI: assert(g->alts == 0 && g->nep[0] == 2 && g->ep[0][0] == 0x01 && g->ep[0][1] == 0x81); break;
+        case T_AS: assert(g->alts == 1 && !g->nep[0] && g->nep[1] == 1 && g->ep[1][0] == 0x84); break;
+        case T_ASO: assert(g->alts == 1 && !g->nep[0] && g->nep[1] == 1 && g->ep[1][0] == 0x04); break;
+        case T_COMM: assert(g->nep[0] == 1 && g->ep[0][0] == 0x82); break;
+        case T_DATA: assert(g->nep[0] == 2 && g->ep[0][0] == 0x03 && g->ep[0][1] == 0x83); break;
+        }
+    }
+    /* IADs: with the console, one per function; plain, the audio function's only with FELUCCA_UAC_IAD */
+    {
+        uint8_t fn = (uint8_t)(1 + nas + (ml != 2)), k = 0;
+        int plain_iad = FELUCCA_UAC_IAD && has_uac;
+        if (cdc_on) {
+            assert(niad == 2);
+            if (cdc_first)
+                assert(iad[0][0] == 0 && iad[0][1] == 2 && iad_at[0] == 2), k = 1;
+            assert(iad[k][0] == aud && iad[k][1] == fn && iad_at[k] == 1);
+            if (!cdc_first)
+                assert(iad[1][0] == nf - 2 && iad[1][1] == 2 && iad_at[1] == 2);
+            assert(dv[2] == 0x00 && dv[3] == 0x02);
+        } else {
+            assert(niad == (plain_iad ? 1 : 0));
+            if (plain_iad)
+                assert(iad[0][0] == 0 && iad[0][1] == fn && iad_at[0] == 1);
+            if (plain_iad)
+                assert(dv[4] == 0xEF && dv[5] == 2 && dv[6] == 1 && dv[2] == 0x00 && dv[3] == 0x02);
+            else
+                assert(dv[4] == 0 && dv[5] == 0 && dv[6] == 0 && dv[2] == 0x10 && dv[3] == 0x01);
+        }
+    }
+    /* bcdDevice: each option set its own, so a host never reuses what it cached for another */
+    {
+        uint32_t lo = 0x10u * (uint32_t)(has_uac + FELUCCA_UAC_48K) + 0x40u * (uint32_t)out + 0x08u * (uint32_t)as_first
+                      + 0x80u * (uint32_t)(ml == 1) + (cdc_on ? 0x01u + 2u * FELUCCA_USB_LAYOUT : 0u);
+        uint32_t hi = 3u + (uint32_t)(ml == 2) + 2u * (uint32_t)(FELUCCA_UAC_IAD && has_uac);
+        assert(dv[12] == lo && dv[13] == hi);
+    }
+    /* SET_INTERFACE: the stream starts and stops on its own interface only */
+    usb.config = 1;
+    for (i = 0; i < nf; i++) {
+        uint8_t n = f[i].num;
+        if (want[i] == T_AS || want[i] == T_ASO) {
+#if FELUCCA_UAC
+            volatile uint8_t *alt = &uac.alt;
+#if FELUCCA_UAC_OUT
+            if (want[i] == T_ASO)
+                alt = &uo.alt;
+#endif
+            t_setup(0x01, 0x0B, 1, n, 0);
+            assert(t_acked() && *alt == 1);
+            t_setup(0x81, 0x0A, 0, n, 1);
+            assert(ep_cnt[0] == 1 && ep0buf[0] == 1);
+            for (uint8_t j = 0; j < nf; j++)            /* alt 1 elsewhere: the other stream's, or stalled */
+                if (j != i) {
+                    int stream = want[j] == T_AS || want[j] == T_ASO;
+                    t_setup(0x01, 0x0B, 1, f[j].num, 0);
+                    assert(t_acked() == stream && *alt == 1);
+                    t_setup(0x01, 0x0B, 0, f[j].num, 0);
+                    assert(t_acked() && *alt == 1);
+                }
+            t_setup(0x01, 0x0B, 0, n, 0);
+            assert(t_acked() && *alt == 0);
+#endif
+        } else {
+            t_setup(0x01, 0x0B, 1, n, 0);
+            assert(!t_acked());
+            t_setup(0x01, 0x0B, 0, n, 0);
+            assert(t_acked());
+            t_setup(0x81, 0x0A, 0, n, 1);
+            assert(ep_cnt[0] == 1 && ep0buf[0] == 0);
+        }
+    }
+    usb.config = 0;
+    return t_crc32(t_crc32(0, dv, 18), c, cl);
+}
+
+static void test_descriptors(void)
+{
+    uint32_t plain, cdc = 0;
+    int verbose = getenv("USB_DESC_DUMP") != 0;
+    usb_start();
+    plain = check_descriptors(0, verbose);
+#if FELUCCA_CDC
+    cdc = check_descriptors(1, verbose);
+    usb_cdc_on = FELUCCA_CDC_DEFAULT != 0;
+#endif
+    if (getenv("USB_DESC_CRC"))
+        printf("crc plain %08X cdc %08X\n", plain, cdc);
+#ifdef TEST_GOLDEN_PLAIN
+    assert(plain == (uint32_t)TEST_GOLDEN_PLAIN);
+#endif
+#ifdef TEST_GOLDEN_CDC
+    assert(cdc == (uint32_t)TEST_GOLDEN_CDC);
+#endif
+    usb_detach();
+    puts("USB device: descriptors as a host reads them, SET_INTERFACE on the streams: OK");
+}
 
 #if FELUCCA_USB_HOST
 /* ---------------------------------------------------------- the tests --- */
@@ -821,6 +1090,7 @@ int main(void)
     test_host_output(1);
     test_endpoint_selection();
     test_mode_lifecycle();
+    test_descriptors();
     puts("USB host: all OK");
     return 0;
 }
@@ -828,6 +1098,7 @@ int main(void)
 #else
 int main(void)
 {
+    test_descriptors();
     usb_start();
     assert(usb.up && !usb.config);
     usb.config = 1;

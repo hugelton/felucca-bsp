@@ -53,11 +53,28 @@
 #ifndef FELUCCA_UAC_AS_FIRST
 #define FELUCCA_UAC_AS_FIRST 0
 #endif
+#ifndef FELUCCA_UAC_MIDI_LAST
+#define FELUCCA_UAC_MIDI_LAST 0
+#endif
+#ifndef FELUCCA_UAC_IAD
+#define FELUCCA_UAC_IAD 0
+#endif
+#if FELUCCA_UAC_MIDI_LAST < 0 || FELUCCA_UAC_MIDI_LAST > 2
+#error "FELUCCA_UAC_MIDI_LAST is 0..2"
+#endif
 #if !FELUCCA_UAC
 #undef FELUCCA_UAC_48K
 #define FELUCCA_UAC_48K 0
 #undef FELUCCA_UAC_OUT
 #define FELUCCA_UAC_OUT 0
+#undef FELUCCA_UAC_AS_FIRST
+#define FELUCCA_UAC_AS_FIRST 0
+#undef FELUCCA_UAC_MIDI_LAST
+#define FELUCCA_UAC_MIDI_LAST 0
+#undef FELUCCA_UAC_IAD
+#define FELUCCA_UAC_IAD 0
+#endif
+#if FELUCCA_UAC_MIDI_LAST                 /* the collection follows the interfaces: the streams come first anyway */
 #undef FELUCCA_UAC_AS_FIRST
 #define FELUCCA_UAC_AS_FIRST 0
 #endif
@@ -291,12 +308,14 @@ static uint32_t midi_out_room(void)                  /* free slots in the out ri
 }
 
 /* ------------------------------------------------------- descriptors --- */
-/* Two functions: audio + MIDI (0 audio control, 1 MIDI streaming, 2 audio streaming with FELUCCA_UAC)
+/* Two functions: audio + MIDI (0 audio control, 1 MIDI streaming, 2 audio streaming with FELUCCA_UAC, 3 the
+ * output stream with FELUCCA_UAC_OUT; with FELUCCA_UAC_MIDI_LAST: 0 audio control, 1.. the streams, MIDI last)
  * and, with FELUCCA_CDC, the CDC-ACM console (communication + data). The endpoints never move:
  * EP1 MIDI, EP2 CDC notify, EP3 CDC data, EP4 audio.
  * bcdDevice: 3.00 MIDI, +0.10 the audio input (+0.20 since 1.1: 44.1 and 48 kHz, FELUCCA_UAC_48K), +0.40 the
  * audio output (FELUCCA_UAC_OUT), +0.08 the audio streaming interfaces first in the AC collection
- * (FELUCCA_UAC_AS_FIRST), +0.01 CDC
+ * (FELUCCA_UAC_AS_FIRST), +0.80 MIDI the last interface (FELUCCA_UAC_MIDI_LAST=1; =2: +1.00), +2.00 the
+ * IAD without the console (FELUCCA_UAC_IAD), +0.01 CDC
  * (+0.02 per FELUCCA_USB_LAYOUT step, so a host never reuses what it learnt about another layout).
  * FELUCCA_USB_LAYOUT, how the CDC build presents itself (#67: macOS 13-15 attach Apple's CDC composite
  * driver to a misc / IAD device that has a CDC function, and their kernel audio driver then never
@@ -341,18 +360,47 @@ static uint32_t midi_out_room(void)                  /* free slots in the out ri
  * next look-up runs past the shortened list, the parser gives up before the audio streaming interface and no
  * audio device appears (MIDI still works). Listed last, MIDI is dropped at the end of the walk. The class spec
  * gives the order no meaning (Linux takes each listed interface on its own). 0 (the default): MIDI first. */
-#if FELUCCA_UAC_AS_FIRST
-#define AC_COLL2(a) (a) + 2, (a) + 1
-#define AC_COLL3(a) (a) + 2, (a) + 3, (a) + 1
+/* FELUCCA_UAC_MIDI_LAST (fm1-loom#7, Felucca #67, bisected by darosh on macOS 15.8.1): the interface order
+ * matters to macOS 13-15, the collection's order does not. With MIDI streaming as interface 1, between audio
+ * control and audio streaming, no audio device appears, whatever the collection lists or in which order
+ * (FELUCCA_UAC_AS_FIRST alone does not help there); with the audio streaming interface(s) right after audio
+ * control and MIDI after them, it does, with or without MIDI in the collection.
+ *   0  audio control, MIDI, audio streaming (in, out)                                     (the default)
+ *   1  audio control, audio streaming (in, out), MIDI; the collection lists them in that order
+ *   2  as 1, the collection without MIDI (the streaming interfaces only). A test build: Linux's snd-usb-audio
+ *      creates a MIDI port only for a MIDI streaming interface in the collection (sound/usb/card.c,
+ *      snd_usb_create_streams), so MIDI over USB is gone there.
+ * The interface numbers below follow; the requests (SET_INTERFACE, GET_INTERFACE) use them by name. */
+#if FELUCCA_UAC_MIDI_LAST
+#define IF_AS 1                                            /* from the audio function's first interface */
+#define IF_ASO 2
+#define IF_MIDI (1 + FELUCCA_UAC + FELUCCA_UAC_OUT)
 #else
-#define AC_COLL2(a) (a) + 1, (a) + 2
-#define AC_COLL3(a) (a) + 1, (a) + 2, (a) + 3
+#define IF_MIDI 1
+#define IF_AS 2
+#define IF_ASO 3
 #endif
+#if FELUCCA_UAC_OUT
+#define AC_STREAMS(a) (a) + IF_AS, (a) + IF_ASO
+#else
+#define AC_STREAMS(a) (a) + IF_AS
+#endif
+#if FELUCCA_UAC_MIDI_LAST == 2
+#define AC_NCOLL (FELUCCA_UAC + FELUCCA_UAC_OUT)
+#define AC_COLL(a) AC_STREAMS(a)
+#elif FELUCCA_UAC_MIDI_LAST || FELUCCA_UAC_AS_FIRST
+#define AC_NCOLL (1 + FELUCCA_UAC + FELUCCA_UAC_OUT)
+#define AC_COLL(a) AC_STREAMS(a), (a) + IF_MIDI
+#else
+#define AC_NCOLL (1 + FELUCCA_UAC + FELUCCA_UAC_OUT)
+#define AC_COLL(a) (a) + IF_MIDI, AC_STREAMS(a)
+#endif
+#define D_AC_HEADER(a, terminals) 8 + AC_NCOLL, 0x24, 1, 0x00, 0x01, 8 + AC_NCOLL + (terminals), 0, AC_NCOLL, AC_COLL(a),
 #if FELUCCA_UAC
 #if FELUCCA_UAC_OUT
 #define D_AC(a)                                                                                      \
     9, 4, (a), 0, 0, 1, 1, 0, 0,                                                                     \
-    11, 0x24, 1, 0x00, 0x01, 53, 0, 3, AC_COLL3(a),        /* AC header: MIDI, both streams */          \
+    D_AC_HEADER((a), 42)                                   /* AC header: MIDI, both streams */          \
     12, 0x24, 2, 1, 0x03, 0x06, 0, 2, 0x03, 0x00, 0, 0,    /* input terminal 1: line, 2 ch (L R) */      \
     9, 0x24, 3, 2, 0x01, 0x01, 0, 1, 0,                    /* output terminal 2: USB streaming, from 1 */ \
     12, 0x24, 2, 3, 0x01, 0x01, 0, 2, 0x03, 0x00, 0, 0,    /* input terminal 3: USB streaming, 2 ch */   \
@@ -367,7 +415,7 @@ static uint32_t midi_out_room(void)                  /* free slots in the out ri
 #else
 #define D_AC(a)                                                                                      \
     9, 4, (a), 0, 0, 1, 1, 0, 0,                                                                     \
-    10, 0x24, 1, 0x00, 0x01, 31, 0, 2, AC_COLL2(a),        /* AC header 1.00: MIDI + audio streaming */ \
+    D_AC_HEADER((a), 21)                                   /* AC header 1.00: MIDI + audio streaming */ \
     12, 0x24, 2, 1, 0x03, 0x06, 0, 2, 0x03, 0x00, 0, 0,    /* input terminal 1: line, 2 ch (L R) */      \
     9, 0x24, 3, 2, 0x01, 0x01, 0, 1, 0,                    /* output terminal 2: USB streaming, from 1 */
 #define D_ASO(o)
@@ -395,9 +443,15 @@ static uint32_t midi_out_room(void)                  /* free slots in the out ri
     5, 0x25, 1, 1, 1,                                                                                \
     9, 5, 0x81, 2, 64, 0, 0, 0, 0,                                                                   \
     5, 0x25, 1, 1, 3,
-#define D_AUDIO(a) D_AC(a) D_MIDI((a) + 1) D_AS((a) + 2) D_ASO((a) + 3)   /* audio + MIDI from interface a */
+/* audio + MIDI from interface a, in the order FELUCCA_UAC_MIDI_LAST picks */
+#if FELUCCA_UAC_MIDI_LAST
+#define D_AUDIO(a) D_AC(a) D_AS((a) + IF_AS) D_ASO((a) + IF_ASO) D_MIDI((a) + IF_MIDI)
+#else
+#define D_AUDIO(a) D_AC(a) D_MIDI((a) + IF_MIDI) D_AS((a) + IF_AS) D_ASO((a) + IF_ASO)
+#endif
 #define AUD_NIF (2 + FELUCCA_UAC + FELUCCA_UAC_OUT)
-#define AUD_LEN (92 + (63 + FMT_LEN) * FELUCCA_UAC + 74 * FELUCCA_UAC_OUT)
+#define AUD_FN_NIF (AUD_NIF - (FELUCCA_UAC_MIDI_LAST == 2))   /* the audio function's (its IAD): AC + its collection */
+#define AUD_LEN (92 + (63 + FMT_LEN) * FELUCCA_UAC + 74 * FELUCCA_UAC_OUT - (FELUCCA_UAC_MIDI_LAST == 2))
 #define D_CDC(c)                                                                                     \
     D_IAD((c), 2, 2, 2, 1),                                /* IAD: CDC ACM */                           \
     9, 4, (c), 0, 1, 2, 2, 1, 0,                           /* communication */                          \
@@ -411,15 +465,24 @@ static uint32_t midi_out_room(void)                  /* free slots in the out ri
     7, 5, 0x83, 2, 64, 0, 0,                               /* EP3 IN bulk */
 #define CDC_LEN 66                                         /* with its IAD */
 #define BCD_LO(cdc) (0x10 * (FELUCCA_UAC + FELUCCA_UAC_48K) + 0x40 * FELUCCA_UAC_OUT + 0x08 * FELUCCA_UAC_AS_FIRST + \
-                     ((cdc) ? 0x01 + 2 * FELUCCA_USB_LAYOUT : 0))
+                     0x80 * (FELUCCA_UAC_MIDI_LAST == 1) + ((cdc) ? 0x01 + 2 * FELUCCA_USB_LAYOUT : 0))
+#define BCD_HI (0x03 + (FELUCCA_UAC_MIDI_LAST == 2) + 2 * FELUCCA_UAC_IAD)
 #define D_DEV(bcdusb, cls, sub, proto, cdc)                                                          \
     18, 1, (bcdusb) & 0xFF, (bcdusb) >> 8, (cls), (sub), (proto), 64, 0x09, 0x12, FELUCCA_USB_PID & 0xFF, \
-    FELUCCA_USB_PID >> 8, BCD_LO(cdc), 0x03, 1, 2, 0, 1
+    FELUCCA_USB_PID >> 8, BCD_LO(cdc), BCD_HI, 1, 2, 0, 1
 
-/* without the console (FELUCCA_CDC=0, or usb_cdc_on = 0): class 0, no IAD, as a plain USB-MIDI / audio device */
+/* without the console (FELUCCA_CDC=0, or usb_cdc_on = 0): class 0, no IAD, as a plain USB-MIDI / audio device.
+ * FELUCCA_UAC_IAD=1: an IAD over the audio function (audio control + its collection), so the device is misc / IAD
+ * (EF 02 01, USB 2.00); with the console the IADs are there anyway. */
+#if FELUCCA_UAC_IAD
+#define CFG_LEN_PLAIN (9 + 8 + AUD_LEN)
+static const uint8_t DEV_DESC_PLAIN[18] = {D_DEV(0x0200, 0xEF, 0x02, 0x01, 0)};
+static const uint8_t CFG_DESC_PLAIN[] = {D_CFG(CFG_LEN_PLAIN, AUD_NIF), D_IAD(0, AUD_FN_NIF, 1, 1, 0), D_AUDIO(0)};
+#else
 #define CFG_LEN_PLAIN (9 + AUD_LEN)
 static const uint8_t DEV_DESC_PLAIN[18] = {D_DEV(0x0110, 0, 0, 0, 0)};
 static const uint8_t CFG_DESC_PLAIN[] = {D_CFG(CFG_LEN_PLAIN, AUD_NIF), D_AUDIO(0)};
+#endif
 typedef char cfg_plain_len_ok[sizeof CFG_DESC_PLAIN == CFG_LEN_PLAIN ? 1 : -1];
 #if FELUCCA_CDC
 #define CFG_LEN (9 + 8 + AUD_LEN + CDC_LEN)
@@ -443,7 +506,7 @@ static const uint8_t CFG_DESC[] = {
 #if FELUCCA_USB_LAYOUT == 1
     D_CDC(CDC_IF_CDC)
 #endif
-    D_IAD(AUD_IF_CDC, AUD_NIF, 1, 1, 0),                  /* IAD: audio + MIDI */
+    D_IAD(AUD_IF_CDC, AUD_FN_NIF, 1, 1, 0),               /* IAD: audio + MIDI */
     D_AUDIO(AUD_IF_CDC)
 #if FELUCCA_USB_LAYOUT != 1
     D_CDC(CDC_IF_CDC)
@@ -459,8 +522,8 @@ static uint8_t usb_cdc_on = FELUCCA_CDC_DEFAULT != 0;      /* the console is pre
 #define USB_CDC_ON 0
 #define AUD_IF 0u
 #endif
-#define UAC_AS_IF (AUD_IF + 2u)
-#define UAC_ASO_IF (AUD_IF + 3u)            /* the output stream (FELUCCA_UAC_OUT) */
+#define UAC_AS_IF (AUD_IF + IF_AS)
+#define UAC_ASO_IF (AUD_IF + IF_ASO)        /* the output stream (FELUCCA_UAC_OUT) */
 static const uint8_t STR0[4] = {4, 3, 0x09, 0x04};
 static const uint8_t STR1[] = {42, 3, 'H', 0, 0xFC, 0, 'g', 0, 'e', 0, 'l', 0, 't', 0, 'o', 0, 'n', 0, ' ', 0, 'I', 0,
                                'n', 0, 's', 0, 't', 0, 'r', 0, 'u', 0, 'm', 0, 'e', 0, 'n', 0, 't', 0, 's', 0};
