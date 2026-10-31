@@ -104,7 +104,9 @@
  * converter's clock, FM1_ADC_CON), the tick starts a conversion on row PA7 (frame phase 0) or PA8 (phase 1) of the
  * column it has just latched and takes the result at the next tick, so each key on those rows is read once per two
  * frames (~2.2 ms): 1023 open, falling as the key's carbon pill is pressed. The MASTER pot takes the slot of
- * (phase 1, column 0, PA8 = OCT-) and lands in fm1_an.master. The app gets each reading:
+ * (phase 1, column 0, PA8 = OCT-) and lands in fm1_an.master; every FM1_BATT_EVERY-th of its slots reads the battery
+ * instead (fm1_an.batt, 0 until the first), as the main loop cannot while the scan owns the converter. The app gets
+ * each reading:
  *   FM1_INPUT_ANALOG(col, rowbit, v, driven)   rowbit 3 = PA7, 4 = PA8; the key is FM1_KEYMAP[rowbit][col]
  * With fm1_an.drive set, a key for which FM1_INPUT_DRIVE(col, rowbit) is nonzero (a held key) is read with its row
  * driven high by a weak output instead of pulled up: the pull-up alone sees little but the matrix diode, the driver
@@ -213,6 +215,9 @@ static uint8_t fm1_led_mid[FM1_NCOL];      /* a steady mid level (see top): lit 
 #ifndef FM1_INPUT_LED_OK
 #define FM1_INPUT_LED_OK(col, rowbit) 1
 #endif
+#ifndef FM1_BATT_EVERY
+#define FM1_BATT_EVERY 64u       /* the pot's slots per battery reading (one slot each ~3.3 ms: ~0.2 s) */
+#endif
 static volatile struct {
     uint16_t con;                /* the conversion's clock / start delay (FM1_ADC_CON); 0 = analog off */
     uint8_t drive;               /* a held key read with its row driven (FM1_INPUT_DRIVE) */
@@ -222,6 +227,9 @@ static volatile struct {
     uint8_t probing;             /* the pending conversion is the probe (PA10 / PA6 released at the take) */
     uint8_t phase;               /* frame phase: 0 PA7, 1 PA8, 2 the probe */
     uint16_t master;             /* the MASTER pot, 0..1023 */
+    uint16_t batt;               /* the battery's divider, 0..1023 (0: not read yet) */
+    uint8_t batt_n;              /* the pot's slots since the battery's */
+    uint8_t batting;             /* the pending conversion is the battery's */
     uint16_t timeouts;           /* conversions not done after a tick (the clock too slow) */
 } fm1_an;
 
@@ -474,9 +482,10 @@ static void fm1__pa10_probe(int on)
 /* the conversion started on the previous tick: its result to the app (FM1_INPUT_ANALOG / _PROBE) or the pot */
 static void fm1__an_take(void)
 {
-    uint32_t driven = fm1_an.driven, probing = fm1_an.probing;
+    uint32_t driven = fm1_an.driven, probing = fm1_an.probing, batting = fm1_an.batting;
     (void)driven;                                  /* (FM1_INPUT_ANALOG may ignore it) */
     fm1_an.pend = 0;
+    fm1_an.batting = 0;
     if (driven || probing)
         fm1__row_release(fm1_an.rowbit);
     if (probing)
@@ -488,6 +497,8 @@ static void fm1__an_take(void)
             FM1_INPUT_PROBE(fm1_an.col, fm1_an.rowbit, v, (fm1_in.raw[fm1_an.col] >> fm1_an.rowbit) & 1u);
         else if (fm1_an.rowbit)
             FM1_INPUT_ANALOG(fm1_an.col, fm1_an.rowbit, v, driven);
+        else if (batting)
+            fm1_an.batt = (uint16_t)(v ? v : 1u);
         else
             fm1_an.master = (uint16_t)v;
     } else {
@@ -514,9 +525,14 @@ static void fm1__an_start(uint32_t n, uint32_t lit)
         fm1_an.pend = 1;
         return;
     }
-    if (fm1_an.phase && n == 0u) {                 /* the pot's slot */
+    if (fm1_an.phase && n == 0u) {                 /* the pot's slot (now and then the battery's) */
         ch = FM1_ADC_MASTER;
         rowbit = 0;
+        if (++fm1_an.batt_n >= FM1_BATT_EVERY) {
+            fm1_an.batt_n = 0;
+            fm1_an.batting = 1;
+            ch = FM1_ADC_BATT;
+        }
     } else {
         ch = fm1_an.phase ? FM1_ADC_ROW_PA8 : FM1_ADC_ROW_PA7;
         rowbit = fm1_an.phase ? 4u : 3u;
