@@ -33,7 +33,9 @@
 #define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB */
 #define OTA_AREA_LEN 0x5000u
 #define OTA_RES (OTA_AREA + OTA_AREA_LEN - 0x100u)  /* 0xE4F00 = 4K boundary - 256: SPL scan */
-#define OTA_FRAME_MAX 640u                       /* 512-B response = 605 wire bytes */
+#ifndef OTA_FRAME_MAX
+#define OTA_FRAME_MAX 640u                       /* 512-B response = 605 wire bytes (the loader: a 4 KiB one) */
+#endif
 
 static int ota_wire_send(const uint8_t *p, uint32_t n);
 static int ota_frame_get(const uint8_t **p, uint32_t *n);
