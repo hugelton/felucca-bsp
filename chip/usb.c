@@ -28,7 +28,9 @@
  * stereo, 44.1 kHz, EP4 OUT isochronous adaptive). uac_service takes each packet into a ring (nested in the render
  * too); uac_play, after each render, adds it to the output, resampled to the I2S clock (~44,117.6 Hz): the ring's
  * fill steers the rate, so it neither runs dry nor overflows.
- * FELUCCA_USB_HOST=1 adds opt-in MIDI host mode; see docs/USB_HOST.md for the main-loop contract. */
+ * FELUCCA_USB_HOST=1 adds opt-in MIDI host mode; see docs/USB_HOST.md for the main-loop contract.
+ * FELUCCA_MIDI_IN_RAW, a function of the firmware's (void f(uint32_t pkt)), is given every EP1 OUT event packet as
+ * it came, for a MIDI parser of its own (midi_in_event). */
 #include "fm1_usb.h"   /* registers (chip/) */
 /* Host is opt-in and excluded from update loaders, even with a global build flag. */
 #ifndef FELUCCA_USB_HOST
@@ -993,9 +995,17 @@ static void sysex_byte(uint8_t b)
     }
 }
 
+/* FELUCCA_MIDI_IN_RAW (felucca-bsp#15, optional): every packet as it came, before the handling below, which goes on
+ * as it is, for a firmware that parses MIDI itself: the ring takes channel messages and F8 FA FB FC only, SysEx
+ * goes to the soft key and the update protocol only, and system common (song position, song select, tune request)
+ * and the other real-time bytes are dropped. Called from usb_poll (the TIMER5 ISR), so it must be short; ep1_take
+ * holds the host back on this file's ring only. Undefined: nothing. */
 static void midi_in_event(uint32_t pkt)                 /* one USB-MIDI event packet */
 {
     uint32_t cin = pkt & 15u, st = (pkt >> 8) & 0xFFu;
+#ifdef FELUCCA_MIDI_IN_RAW
+    FELUCCA_MIDI_IN_RAW(pkt);
+#endif
     if (cin >= 4u && cin <= 7u) {
         uint32_t k, nb = cin == 4u || cin == 7u ? 3u : cin == 6u ? 2u : 1u;
         for (k = 0; k < nb; k++)
