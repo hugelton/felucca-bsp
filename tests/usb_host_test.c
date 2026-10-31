@@ -10,10 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
 #include "../chip/fm1_usb.h"
-#pragma GCC diagnostic pop
 
 /* ------------------------------------------------------- the devices --- */
 enum { KBD, HUB, STICK, NDEV };
@@ -30,6 +27,9 @@ static dev_t_ dev[NDEV];
 static uint8_t kbd_cfg[128], stick_cfg[64], hub_cfg[32];
 static uint16_t kbd_cfg_len;
 static int root;                        /* the device on the root port, -1 none */
+static uint8_t str_on;                  /* the devices answer string requests (the keyboard has a product string) */
+static const char *str_product = "Test Keys 25";
+static uint32_t str_reads;              /* the keyboard's product string read */
 static dev_t_ *dflt;                    /* the device answering at address 0 */
 
 static uint16_t build_kbd_cfg(uint8_t *d, int with_out)
@@ -142,6 +142,24 @@ static int answer(dev_t_ *d, const uint8_t *s)
     } else if (rt == 0x80 && rq == 6 && (val >> 8) == 2) {
         memcpy(rsp, d->cfgd, d->cfglen);
         n = d->cfglen;
+    } else if (rt == 0x80 && rq == 6 && (val >> 8) == 3 && str_on) {   /* strings: languages, then iProduct (2) */
+        uint32_t i;
+        if ((val & 0xFFu) == 0) {
+            static const uint8_t langs[4] = {4, 3, 0x09, 0x04};
+            memcpy(rsp, langs, 4);
+            n = 4;
+        } else if ((val & 0xFFu) == 2 && idx == 0x0409 && d == &dev[KBD]) {
+            for (i = 0; str_product[i]; i++) {
+                rsp[2 + 2 * i] = (uint8_t)str_product[i];
+                rsp[3 + 2 * i] = str_product[i] == '\x01' ? 0x20 : 0;   /* (\x01: a non-ASCII character, U+2001) */
+            }
+            rsp[0] = (uint8_t)(2 + 2 * i);
+            rsp[1] = 3;
+            n = rsp[0];
+            str_reads++;
+        } else {
+            return 0;
+        }
     } else if (rt == 0xA0 && rq == 6 && val == 0x2900 && d->ports) {
         uint8_t hd[9] = {9, 0x29, d->ports, 0, 0, 10, 0, 0, 0xFF};
         memcpy(rsp, hd, 9);
@@ -201,6 +219,7 @@ static void deliver_rx(void)            /* an IN request is pending on EP1 and t
     d = by_addr(common[0]);
     if (!d || d != &dev[KBD] || rx_head == rx_tail)
         return;
+    assert(ep_radr[1]);                                 /* the host code gave EP1 its buffer */
     memcpy(ep_radr[1], rx_q[rx_tail % 8], rx_n[rx_tail % 8]);
     regs[1][22] = rx_n[rx_tail % 8];
     regs[1][23] = 0;
@@ -222,6 +241,7 @@ static void mock_write(uint32_t r, uint32_t v)
         if (v == 0x0A) {
             setup_requests++;
             uint8_t s[8];
+            assert(ep_radr[0]);                         /* the host code gave EP0 its buffer */
             memcpy(s, ep_radr[0], 8);
             if (ep0_timeout)
                 regs[0][17] = 2;
@@ -233,6 +253,7 @@ static void mock_write(uint32_t r, uint32_t v)
             uint32_t mps = d && d->mps0 ? d->mps0 : 8u, n = rsp_len - rsp_pos;
             if (n > mps)
                 n = mps;
+            assert(ep_radr[0]);                         /* the host code gave EP0 its buffer */
             memcpy(ep_radr[0], rsp + rsp_pos, n);
             rsp_pos += n;
             regs[0][22] = (uint8_t)n;
@@ -332,6 +353,9 @@ static void fm1_delay_ms(uint32_t ms) { (void)ms; }
 #define HALF_FRAMES 128u
 static volatile uint32_t render_peak;
 static volatile uint8_t render_busy;
+static uint8_t sx_seen[8];                              /* FELUCCA_SYSEX_BYTE: the bytes the hook saw */
+static uint32_t sx_seen_n;
+#define FELUCCA_SYSEX_BYTE(b) (sx_seen_n < sizeof sx_seen ? (void)(sx_seen[sx_seen_n++] = (b)) : (void)0)
 #include "../chip/usb.c"
 
 #if FELUCCA_USB_HOST
@@ -658,6 +682,38 @@ static void test_hub_synth_unplug(void)
     puts("USB host: unplugged OUT-only synth leaves hub idle without retry resets; replug works: OK");
 }
 
+#if FELUCCA_USB_HOST_NAME
+/* the product string (usb_host_name): read once at enumeration, direct and behind the hub; cut, folded to ASCII;
+ * a device without strings, or with no iProduct, connects all the same with no name; gone with the session */
+static void test_name(void)
+{
+    static char longname[48];
+    uint32_t reads;
+    connect(KBD);
+    str_on = 1;
+    str_product = "Test Keys 25  ";
+    host_on(); assert(enumerate() && !strcmp(usb_host_name(), "Test Keys 25") && str_reads == 1);
+    usb_host_switch(0); usb_host_task(fm1_ms); uh.msg = 0;
+    assert(!strcmp(usb_host_name(), ""));
+    connect(HUB);
+    str_on = 1;
+    memset(longname, 'K', 40);
+    longname[3] = '\x01';
+    longname[40] = 0;
+    str_product = longname;
+    reads = str_reads;
+    host_on(); assert(enumerate() && strlen(usb_host_name()) == UH_NAME_MAX && usb_host_name()[3] == '?' &&
+                      usb_host_name()[4] == 'K' && str_reads == reads + 1u);
+    usb_host_switch(0); usb_host_task(fm1_ms); uh.msg = 0;
+    connect(KBD);
+    str_on = 0;                                         /* the strings stall */
+    host_on(); assert(enumerate() && !strcmp(usb_host_name(), "") && uh.msg == UH_MSG_MIDI);
+    usb_host_switch(0); usb_host_task(fm1_ms); uh.msg = 0;
+    str_product = "Test Keys 25";
+    puts("USB host: the device's product string (direct, behind a hub, cut, ASCII; none: connected): OK");
+}
+#endif
+
 static void ack_tx(void)
 {
     const uint8_t *p = ep_tadr[1];
@@ -820,6 +876,9 @@ int main(void)
     test_host_output(0);
     test_host_output(1);
     test_endpoint_selection();
+#if FELUCCA_USB_HOST_NAME
+    test_name();                                        /* (before the lifecycle test, which detaches) */
+#endif
     test_mode_lifecycle();
     puts("USB host: all OK");
     return 0;
@@ -833,10 +892,33 @@ int main(void)
     usb.config = 1;
     assert(midi_out_try(0x643c9009u));
     assert(midi_out_room() == MQ - 1u);
+    {   /* a SysEx whose bytes come one a packet (CIN 0xF), as macOS sends some inside a long frame: taken as SysEx
+         * (here the update key, F0 22 24 35 7D F7); a note's status alone in CIN 0xF outside a SysEx is not */
+        static const uint8_t KEY[6] = {0xF0, 0x22, 0x24, 0x35, 0x7D, 0xF7};
+        uint32_t k, w = mi_w;
+        midi_in_event(0x0Fu | 0x90u << 8);
+        assert(!usb.sx_on && mi_w == w);
+        midi_in_event(0x04u | 0xF0u << 8 | 0x22u << 16 | 0x24u << 24);   /* (F0 22 24 in one packet, the rest alone) */
+        for (k = 3; k < 6u; k++)
+            midi_in_event(0x0Fu | (uint32_t)KEY[k] << 8);
+        assert(usb.uboot_req && !usb.sx_on);
+        usb.uboot_req = 0;
+        for (k = 0; k < 6u; k++)                          /* (every byte alone) */
+            midi_in_event(0x0Fu | (uint32_t)KEY[k] << 8);
+        assert(usb.uboot_req);
+        usb.uboot_req = 0;
+    }
+    {   /* FELUCCA_SYSEX_BYTE sees every byte of a SysEx, F0 and F7 too, in the order they came */
+        static const uint8_t SX[5] = {0xF0, 0x7D, 0x01, 0x02, 0xF7};
+        sx_seen_n = 0;
+        midi_in_event(0x04u | 0xF0u << 8 | 0x7Du << 16 | 0x01u << 24);
+        midi_in_event(0x06u | 0x02u << 8 | 0xF7u << 16);
+        assert(sx_seen_n == 5u && memcmp(sx_seen, SX, 5u) == 0);
+    }
     usb_detach();
     usb_retry(5000u);
     assert(!usb.up);
-    puts("USB device-only/loader: startup, MIDI output and detach: OK");
+    puts("USB device-only/loader: startup, MIDI output, the SysEx byte hook and detach: OK");
     return 0;
 }
 #endif

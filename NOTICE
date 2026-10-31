@@ -29,6 +29,11 @@ they were first published under GPL-3.0-only by the same copyright holder. Each 
 message names the Felucca commit it was taken from. Releases of Felucca that already
 contain these files stay under GPL-3.0-only.
 
+The cache RAM (chip/fm1_cache_ram.h): Copyright (C) 2026 Henri David, from Optimist (https://github.com/w0ts/optimist,
+firmware/hal/fm1_cache.h, f16f6683 and 9a1360ab), offered there under GPL-3.0-only OR MPL-2.0 (Optimist LICENSING.md
+"The cache RAM", 3815869f) and taken here under MPL-2.0; its register addresses and sequence are the AC79 SDK's
+(Apache-2.0). tests/cache_ram_test.c: Copyright (C) 2026 Henri David, MPL-2.0.
+
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi.
 
 USB MIDI host (chip/usb_host.c, chip/usb_host_desc.h, the host additions in chip/fm1_usb.h,
@@ -62,3 +67,10 @@ chip/fm1_rf_cal.h is Apache-2.0: the 2.4 GHz radio's calibration (the VCO bank s
 trims) rewritten in C from JieLi's wl_rf_common.a (Copyright (c) 2024-2026 Zhuhai Jieli Technology Co., Ltd.,
 Apache-2.0 in its AC79 AIoT SDK, https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK); its header states the changes
 (Apache-2.0 section 4(b)).
+
+The Wi-Fi MAC driver (chip/fm1_wifi.h) comes from Optimist by Henri David (hdavid), offered under GPL-3.0-only OR
+MPL-2.0 (the same offer as the Bluetooth radio drivers) and taken here under MPL-2.0; its header keeps both. It was
+written after reading JieLi's Apache-2.0 Wi-Fi driver libraries of the AC79 SDK (as LLVM IR) and running them in an
+emulator to record their register writes: no vendor code is copied, the register addresses and values it uses are
+JieLi's facts. The coexistence controller's set-up words that JieLi's wlc.c writes when Wi-Fi starts are not in
+this BSP: fm1_wifi_up takes them from its caller (fm1-base keeps them, under Apache-2.0).

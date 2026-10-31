@@ -59,6 +59,15 @@ static uint32_t usb_host_message(void)
     return msg;
 }
 
+#if FELUCCA_USB_HOST_NAME
+/* The connected device's product string (its iProduct, in the first language it lists), ASCII: other characters
+ * become '?', control characters are left out, at most UH_NAME_MAX. Empty when nothing is connected, when the device
+ * has no product string or when reading it failed (the connection does not depend on it). Main loop. */
+#define UH_NAME_MAX 31u
+static char uh_name[UH_NAME_MAX + 1u];
+static const char *usb_host_name(void) { return uh.run ? uh_name : ""; }
+#endif
+
 /* ------------------------------------------------ main loop: control --- */
 static void uh_wait(uint32_t ms)                        /* main loop only */
 {
@@ -141,6 +150,34 @@ static int uh_ctl(uint8_t addr, uint8_t rt, uint8_t rq, uint16_t val, uint16_t i
     return r < 0 ? r : (int)got;
 }
 
+#if FELUCCA_USB_HOST_NAME
+static void uh_name_read(uint8_t addr, uint8_t mps)     /* main loop, after SET_CONFIGURATION */
+{
+    uint8_t b[2u + 2u * UH_NAME_MAX], dd[18];
+    uint16_t lang = 0x0409u;
+    uint32_t i, n = 0;
+    int r;
+    uh_name[0] = 0;
+    if (uh_ctl(addr, 0x80, 6, 0x0100, 0, 18, dd, mps) < 16 || !dd[15])   /* the device descriptor: iProduct */
+        return;
+    if (uh_ctl(addr, 0x80, 6, 0x0300, 0, 4, b, mps) >= 4 && b[1] == 3u)   /* string 0: the languages, the first */
+        lang = (uint16_t)(b[2] | b[3] << 8);
+    r = uh_ctl(addr, 0x80, 6, (uint16_t)(0x0300u | dd[15]), lang, (uint16_t)sizeof b, b, mps);
+    if (r < 2 || b[1] != 3u)
+        return;
+    if ((uint32_t)r > b[0])
+        r = b[0];
+    for (i = 2; i + 1u < (uint32_t)r && n < UH_NAME_MAX; i += 2) {   /* UTF-16LE */
+        uint32_t c = (uint32_t)(b[i] | b[i + 1u] << 8);
+        if (c >= 0x20u)
+            uh_name[n++] = c < 0x7Fu ? (char)c : '?';
+    }
+    while (n && uh_name[n - 1u] == ' ')
+        n--;
+    uh_name[n] = 0;
+}
+#endif
+
 /* ---------------------------------------------------- enumeration --- */
 static int uh_hub_probe(uint8_t addr, uint8_t mps, uint8_t cfgval, uh_midi_t *m);
 
@@ -179,6 +216,9 @@ static int uh_probe(uint8_t depth, uh_midi_t *m)
         return 0;
     if (m->alt && uh_ctl(addr, 0x01, 11, m->alt, m->iface, 0, 0, mps) < 0)   /* SET_INTERFACE */
         return 0;
+#if FELUCCA_USB_HOST_NAME
+    uh_name_read(addr, mps);
+#endif
     uh.dev = addr;
     return 1;
 }
