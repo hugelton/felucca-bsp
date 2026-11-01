@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Charles Vestal */
-/* The update loader's screen: "UPDATING", "DO NOT UNPLUG" (smaller), a bar that fills as the app area is written
- * (ldr_progress) and its percentage under it, in the installer page's colours. Mid-install, a host silent for 2 s
- * (ldr_screen_tick, ldr_screen_heard: a cable that dropped, a host gone) turns the lines to "USB LOST", "RECONNECT",
- * the bar and the percentage kept; the host's next frame turns them back (the loader resumes: what is written is
- * skipped). At the end (ldr_screen_done): "DONE", "RESTARTING". Drawn only when something changes: a state, a bar
- * pixel, a percent. The panel is started as the app's lcd.c does (fm1-base device/lcd.c: reset, sleep out, RGB565,
+/* The update loader's screen: "UPDATING", "DO NOT UNPLUG" and "DO NOT POWER OFF" (smaller), a bar that fills as the
+ * app area is written (ldr_progress) and its percentage under it, in the installer page's colours. Until the host
+ * starts the install, a short piece of the bar sweeps across it (the loader waits, alive). Mid-install, a host silent
+ * for 2 s (ldr_screen_tick, ldr_screen_heard: a cable that dropped, a host gone) turns the lines to "USB LOST",
+ * "RECONNECT THE CABLE", "DO NOT POWER OFF" (a paused install is not a safe one to cut), the bar and the percentage
+ * kept; the host's next frame turns them back (the loader resumes: what is written is skipped). At the end
+ * (ldr_screen_done): "DONE", "RESTARTING", the only lines without the power warning. Drawn only when something
+ * changes: a state, a bar pixel, a percent, a sweep step (before the install only). The panel is started as the app's lcd.c does (fm1-base device/lcd.c: reset, sleep out, RGB565,
  * IPS inversion), polled, at Felucca's SPI1 rate (BAUD 4).
  * Part of loader.c's single unit; every buffer is in RAM (the SPI DMA reads RAM only). */
 #ifndef LDR_SCREEN_TEST                             /* (tests/ldr_screen_test.c brings a model of the panel) */
@@ -16,8 +18,9 @@
 #define SCR_FG 0x49C5u                              /* #48392f brown */
 #define SCR_BAR 0xBA43u                             /* #b84a1e coral */
 #define SCR_TRACK 0xEEF9u                           /* #e8dcc8, the empty bar */
-#define SCR_BIG_Y 76u
-#define SCR_SMALL_Y 110u
+#define SCR_BIG_Y 60u
+#define SCR_SMALL_Y 94u
+#define SCR_POWER_Y 114u
 #define SCR_BAR_X 30u
 #define SCR_BAR_Y 150u
 #define SCR_BAR_W 180u
@@ -25,12 +28,16 @@
 #define SCR_PC_Y 172u
 #define SCR_ROWS 21u                                /* the tallest line: 5x7 glyphs at 3x */
 #define SCR_LOST_POLLS 4000u                        /* 2 s of loader.c's 0.5 ms USB polls without a frame */
+#define SCR_SWEEP_POLLS 200u                        /* a sweep step every 100 ms of polls, before the install */
+#define SCR_SWEEP_W 24u
+#define SCR_SWEEP_STEP 6u
 
 static uint16_t scr_strip[240u * SCR_ROWS];         /* one line of text, byte-swapped (the panel takes MSB first) */
 static uint8_t scr_small[8];
 static uint32_t scr_shown;                          /* bar pixels drawn */
 static uint32_t scr_pc;                             /* the percentage drawn */
 static uint32_t scr_quiet;                          /* polls since the host's last frame */
+static uint32_t scr_wait, scr_sweep;                /* polls waiting; the sweep's x in the bar + 1 (0: none) */
 static uint8_t scr_on, scr_armed;                   /* armed: an install has started */
 static uint8_t scr_state;                           /* 0 updating, 1 USB lost, 2 done */
 
@@ -52,7 +59,9 @@ static const struct { char c; uint8_t rows[7]; } SCR_FONT[] = {
     { 'C', { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E } },
     { 'D', { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E } },
     { 'E', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F } },
+    { 'F', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 } },
     { 'G', { 0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F } },
+    { 'H', { 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } },
     { 'I', { 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E } },
     { 'L', { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F } },
     { 'N', { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 } },
@@ -62,6 +71,7 @@ static const struct { char c; uint8_t rows[7]; } SCR_FONT[] = {
     { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
     { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
     { 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
+    { 'W', { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A } },
 };
 
 static void scr_cmd(uint8_t c)
@@ -139,10 +149,21 @@ static void scr_text(uint32_t y, const char *s, uint32_t scale, uint32_t cols)
     scr_data(scr_strip, w * 7u * scale * 2u);
 }
 
-static void scr_lines(const char *big, const char *small)
+/* the big line, the small one, and the power warning under it but at the end: 19 small characters fit (226 px) */
+static void scr_lines(const char *big, const char *small, uint32_t warn)
 {
     scr_text(SCR_BIG_Y, big, 3, 8);                 /* "UPDATING", "USB LOST", "DONE" */
-    scr_text(SCR_SMALL_Y, small, 2, 13);            /* "DO NOT UNPLUG", "RECONNECT", "RESTARTING" */
+    scr_text(SCR_SMALL_Y, small, 2, 19);            /* "DO NOT UNPLUG", "RECONNECT THE CABLE", "RESTARTING" */
+    scr_text(SCR_POWER_Y, warn ? "DO NOT POWER OFF" : "", 2, 19);
+}
+
+/* the waiting sweep: a piece of the empty bar, one step on */
+static void scr_sweep_step(void)
+{
+    if (scr_sweep)
+        scr_fill(SCR_BAR_X + scr_sweep - 1u, SCR_BAR_Y, SCR_SWEEP_W, SCR_BAR_H, SCR_TRACK);
+    scr_sweep = scr_sweep && scr_sweep + SCR_SWEEP_STEP <= SCR_BAR_W - SCR_SWEEP_W + 1u ? scr_sweep + SCR_SWEEP_STEP : 1u;
+    scr_fill(SCR_BAR_X + scr_sweep - 1u, SCR_BAR_Y, SCR_SWEEP_W, SCR_BAR_H, SCR_BAR);
 }
 
 static void scr_percent(uint32_t pc)                /* "0%" .. "100%" */
@@ -175,7 +196,7 @@ static void ldr_screen_init(void)
     scr_cmd(0x21);                                  /* INVON: IPS panel */
     scr_cmd(0x13);                                  /* NORON */
     scr_fill(0, 0, 240, 240, SCR_BG);
-    scr_lines("UPDATING", "DO NOT UNPLUG");
+    scr_lines("UPDATING", "DO NOT UNPLUG", 1);
     scr_fill(SCR_BAR_X, SCR_BAR_Y, SCR_BAR_W, SCR_BAR_H, SCR_TRACK);
     scr_percent(0);
     scr_cmd(0x29);                                  /* DISPON */
@@ -188,6 +209,8 @@ static void ldr_screen_progress(uint32_t done, uint32_t total)
     uint32_t px, pc;
     if (!scr_on || !total)
         return;
+    if (!scr_armed && scr_sweep)                    /* the install starts: the sweep goes */
+        scr_fill(SCR_BAR_X + scr_sweep - 1u, SCR_BAR_Y, SCR_SWEEP_W, SCR_BAR_H, SCR_TRACK);
     scr_armed = 1;
     px = done >= total ? SCR_BAR_W : done * SCR_BAR_W / total;     /* < 2^32: total <= 2 MiB */
     pc = done >= total ? 100u : done * 100u / total;
@@ -207,17 +230,27 @@ static void ldr_screen_heard(void)
     scr_quiet = 0;
     if (scr_state == 1u) {
         scr_state = 0;
-        scr_lines("UPDATING", "DO NOT UNPLUG");
+        scr_lines("UPDATING", "DO NOT UNPLUG", 1);
     }
 }
 
-/* one USB poll (0.5 ms) without a frame: an install whose host stays silent 2 s is shown lost, once */
+/* one USB poll (0.5 ms) without a frame: before the install the sweep steps; an install whose host stays silent 2 s is
+ * shown lost, once */
 static void ldr_screen_tick(void)
 {
-    if (!scr_on || !scr_armed || scr_state || ++scr_quiet < SCR_LOST_POLLS)
+    if (!scr_on)
+        return;
+    if (!scr_armed) {
+        if (++scr_wait >= SCR_SWEEP_POLLS) {
+            scr_wait = 0;
+            scr_sweep_step();
+        }
+        return;
+    }
+    if (scr_state || ++scr_quiet < SCR_LOST_POLLS)
         return;
     scr_state = 1;
-    scr_lines("USB LOST", "RECONNECT");
+    scr_lines("USB LOST", "RECONNECT THE CABLE", 1);
 }
 
 /* written and verified: the app starts next */
@@ -227,5 +260,5 @@ static void ldr_screen_done(void)
         return;
     ldr_screen_progress(1, 1);
     scr_state = 2;
-    scr_lines("DONE", "RESTARTING");
+    scr_lines("DONE", "RESTARTING", 0);
 }

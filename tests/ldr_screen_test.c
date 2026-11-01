@@ -60,7 +60,7 @@ static int fails;
 /* the band [y, y + 7 * scale) is exactly s, centred, on the cream: every other pixel of the 240 columns the background */
 static int line_is(uint32_t y, const char *s, uint32_t scale)
 {
-    uint32_t len = (uint32_t)strlen(s), w = len * 6u * scale - scale, x0 = (240u - w) / 2u, x, r, i, f;
+    uint32_t len = (uint32_t)strlen(s), w = len ? len * 6u * scale - scale : 0, x0 = (240u - w) / 2u, x, r, i, f;
     for (i = 0; i < len; i++) {
         int found = s[i] == ' ';
         for (f = 0; f < sizeof SCR_FONT / sizeof SCR_FONT[0]; f++)
@@ -98,10 +98,13 @@ static uint32_t bar_px(void)                        /* the bar's filled pixels, 
     return n;
 }
 
+/* the lines, the percentage and the bar; the power warning on every screen but DONE's */
 static void screen(const char *big, const char *small, const char *pc, uint32_t bar, int line)
 {
+    const char *warn = strcmp(big, "DONE") ? "DO NOT POWER OFF" : "";
     CHECK(line_is(SCR_BIG_Y, big, 3), "line %d: the big line is not \"%s\"", line, big);
     CHECK(line_is(SCR_SMALL_Y, small, 2), "line %d: the small line is not \"%s\"", line, small);
+    CHECK(line_is(SCR_POWER_Y, warn, 2), "line %d: the power line is not \"%s\"", line, warn);
     CHECK(line_is(SCR_PC_Y, pc, 2), "line %d: the percentage is not \"%s\"", line, pc);
     CHECK(bar_px() == bar, "line %d: the bar has %u pixels, not %u", line, bar_px(), bar);
 }
@@ -112,6 +115,21 @@ static void clear(void)
     for (y = 0; y < 240u; y++)
         for (x = 0; x < 240u; x++)
             frame[y][x] = SCR_BG;
+}
+
+static uint32_t sweep_x(void)                       /* the sweep's first pixel in the bar's row, 240: none */
+{
+    uint32_t x;
+    for (x = 0; x < 240u; x++)
+        if (frame[SCR_BAR_Y + SCR_BAR_H / 2u][x] == SCR_BAR)
+            return x;
+    return 240u;
+}
+
+static void reset(void)
+{
+    clear();
+    scr_on = 0, scr_shown = 0, scr_pc = 0, scr_state = 0, scr_armed = 0, scr_quiet = 0, scr_wait = 0, scr_sweep = 0;
 }
 
 static void ticks(uint32_t n)
@@ -127,14 +145,34 @@ int main(void)
     CHECK(inits == 1, "the panel is started once");
     screen("UPDATING", "DO NOT UNPLUG", "0%", 0, __LINE__);
 
-    /* waiting for a host before any install: silence is not a lost cable */
+    /* waiting for a host before any install: silence is not a lost cable; the sweep steps every 100 ms, and only then */
     sent = 0;
-    ticks(3 * SCR_LOST_POLLS);
-    CHECK(sent == 0, "%u bytes sent while idle before an install", sent);
-    screen("UPDATING", "DO NOT UNPLUG", "0%", 0, __LINE__);
+    ticks(SCR_SWEEP_POLLS - 1u);
+    CHECK(sent == 0 && sweep_x() == 240u, "%u bytes sent before the first sweep step", sent);
+    ticks(1);
+    screen("UPDATING", "DO NOT UNPLUG", "0%", SCR_SWEEP_W, __LINE__);
+    {
+        uint32_t x0 = sweep_x(), moved = 0, back = 0, last = x0;
+        for (i = 0; i < 3u * SCR_LOST_POLLS / SCR_SWEEP_POLLS; i++) {
+            ticks(SCR_SWEEP_POLLS);
+            moved += sweep_x() != last;
+            back += sweep_x() < last;
+            last = sweep_x();
+            if (bar_px() != SCR_SWEEP_W || last < SCR_BAR_X || last + SCR_SWEEP_W > SCR_BAR_X + SCR_BAR_W)
+                break;
+        }
+        CHECK(x0 == SCR_BAR_X && moved == 3u * SCR_LOST_POLLS / SCR_SWEEP_POLLS && back >= 1u && back <= 3u,
+              "the sweep: from x %u, moved %u times, back to the start %u times, stopped at step %u", x0, moved, back, i);
+    }
+    screen("UPDATING", "DO NOT UNPLUG", "0%", SCR_SWEEP_W, __LINE__);
 
-    /* the install starts; 42 %: the bar and the percentage */
+    /* the install starts: the sweep goes; 42 %: the bar and the percentage */
     ldr_screen_progress(0, 1);
+    screen("UPDATING", "DO NOT UNPLUG", "0%", 0, __LINE__);
+    sent = 0;
+    ticks(SCR_SWEEP_POLLS * 3u);
+    CHECK(sent == 0, "%u bytes sent: the sweep after the install started", sent);
+    ldr_screen_heard();
     ldr_screen_progress(42, 100);
     screen("UPDATING", "DO NOT UNPLUG", "42%", 42u * SCR_BAR_W / 100u, __LINE__);
     sent = 0;
@@ -155,7 +193,7 @@ int main(void)
     CHECK(sent == 0, "%u bytes sent before 2 s of silence", sent);
     screen("UPDATING", "DO NOT UNPLUG", "42%", 42u * SCR_BAR_W / 100u, __LINE__);
     ticks(1);
-    screen("USB LOST", "RECONNECT", "42%", 42u * SCR_BAR_W / 100u, __LINE__);
+    screen("USB LOST", "RECONNECT THE CABLE", "42%", 42u * SCR_BAR_W / 100u, __LINE__);
     sent = 0;
     ticks(10u * SCR_LOST_POLLS);                    /* drawn once */
     CHECK(sent == 0, "%u bytes sent while lost", sent);
@@ -175,7 +213,7 @@ int main(void)
 
     /* lost again, then the end */
     ticks(SCR_LOST_POLLS);
-    screen("USB LOST", "RECONNECT", "99%", 99u * SCR_BAR_W / 100u, __LINE__);
+    screen("USB LOST", "RECONNECT THE CABLE", "99%", 99u * SCR_BAR_W / 100u, __LINE__);
     ldr_screen_heard();
     ldr_screen_progress(100, 100);
     screen("UPDATING", "DO NOT UNPLUG", "100%", SCR_BAR_W, __LINE__);
@@ -197,26 +235,25 @@ int main(void)
     }
 
     /* done with a frame that never reached 100 %: the bar is full */
-    clear();
-    scr_on = 0, scr_shown = 0, scr_pc = 0, scr_state = 0, scr_armed = 0, scr_quiet = 0;
+    reset();
     ldr_screen_init();
     ldr_screen_progress(0, 1);
     ldr_screen_progress(7, 10);
     ldr_screen_done();
     screen("DONE", "RESTARTING", "100%", SCR_BAR_W, __LINE__);
 
-    /* the fast install's calls (loader/ldr_core.c ldr_fast): the table checked, then every app sector, kept or written,
-     * one step: the bar and the percentage move over the sectors compared, not only the ones sent */
+    /* the fast install's calls (loader/ldr_core.c ldr_fast): the table read (its bytes), then every app sector, kept or
+     * written, one step: the bar and the percentage move from 0 over the sectors compared, from the first one */
     {
-        const uint32_t fl = 0x93000u, app = 0x93000u - 0x4000u, total = fl + app;
+        const uint32_t tb = (0x100000u >> 12) * 6u, app = 0x93000u - 0x4000u, total = tb + app;
         uint32_t k, moved = 0, last_pc = 0;
-        clear();
-        scr_on = 0, scr_shown = 0, scr_pc = 0, scr_state = 0, scr_armed = 0, scr_quiet = 0;
+        reset();
         ldr_screen_init();
         ldr_screen_progress(0, 1);
-        ldr_screen_progress(fl, total);
+        ldr_screen_progress(tb, total);
+        CHECK(bar_px() <= 2u && scr_pc == 0, "after the table: %u bar pixels, %u%%", bar_px(), scr_pc);
         for (k = 1; k <= app >> 12; k++) {
-            uint32_t done = fl + (k << 12), pc = done * 100u / total;
+            uint32_t done = tb + (k << 12), pc = done * 100u / total;
             char want[8];
             ldr_screen_progress(done, total);
             snprintf(want, sizeof want, "%u%%", pc);
@@ -227,7 +264,7 @@ int main(void)
             moved += pc != last_pc;
             last_pc = pc;
         }
-        CHECK(moved >= 45u, "the percentage moved %u times over the sectors", moved);
+        CHECK(moved >= 95u, "the percentage moved %u times over the sectors", moved);
         screen("UPDATING", "DO NOT UNPLUG", "100%", SCR_BAR_W, __LINE__);
     }
 

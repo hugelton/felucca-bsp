@@ -3,8 +3,7 @@
 /* The fast install's table check (loader/ldr_core.c ldr_table_ok): the CRC16 advanced over 4 KiB of zeros in one step
  * (ldr_zeros4k) gives what ota_crc16 over the zeros gives, for every bit of the register (the CRC is linear: so for
  * every value) and for random ones; the whole check gives what the old one (4 KiB of zeros through ota_crc16 per
- * sector, kept here) gives, on random and zero tables, and takes a real flash.bin's table; the bar moves over it from 0,
- * never back, never past flash.bin's part of the scale. */
+ * sector, kept here) gives, on random and zero tables, and takes a real flash.bin's table. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,16 +34,7 @@ static int ldr_prog(uint32_t off, const void *p, uint32_t n) { (void)off; (void)
 static void ldr_record_clear(void) {}
 static int ldr_erase_begin(uint32_t off) { (void)off; return -1; }
 static int ldr_erase_end(void) { return -1; }
-static uint32_t prog_calls, prog_first, prog_last, prog_total, prog_back;
-static void ldr_progress(uint32_t done, uint32_t total)
-{
-    if (!prog_calls++)
-        prog_first = done;
-    else if (done < prog_last)
-        prog_back++;
-    prog_last = done;
-    prog_total = total;
-}
+static void ldr_progress(uint32_t done, uint32_t total) { (void)done; (void)total; }
 #include "../loader/ldr_core.c"
 
 static int fails;
@@ -75,8 +65,6 @@ static uint32_t rnd(void)
     return s;
 }
 
-static void prog_reset(void) { prog_calls = prog_first = prog_last = prog_total = prog_back = 0; }
-
 int main(void)
 {
     static uint8_t t[LDR_NMAX * 6u], img[40u * 0x1000u];
@@ -102,14 +90,9 @@ int main(void)
             for (k = 0; k < n * 6u; k++)
                 t[k] = z ? 0 : (uint8_t)rnd();
             want = old_table_crc(t, n);
-            prog_reset();
-            CHECK(ldr_table_ok(t, n, want, (n << 12) + 0x8F000u),
+            CHECK(ldr_table_ok(t, n, want),
                   "%s table of %u: the old check's CRC %#x not taken", z ? "a zero" : "a random", n, want);
-            /* the bar: from 0, never back, within flash.bin's part, every 32 sectors */
-            CHECK(prog_calls == (n + 31u) / 32u && prog_first == 0 && !prog_back && prog_last < (n << 12) &&
-                  prog_total == (n << 12) + 0x8F000u, "table of %u: progress %u calls from %u to %u of %u, %u back",
-                  n, prog_calls, prog_first, prog_last, prog_total, prog_back);
-            CHECK(!ldr_table_ok(t, n, want ^ 0x0100u, (n << 12) + 0x8F000u),
+            CHECK(!ldr_table_ok(t, n, want ^ 0x0100u),
                   "%s table of %u: a wrong CRC taken", z ? "a zero" : "a random", n);
         }
     }
@@ -124,9 +107,9 @@ int main(void)
         t[k * 6u + 1u] = (uint8_t)(c >> 8);
     }
     c = ota_crc16(img, sizeof img, 0);
-    CHECK(ldr_table_ok(t, ns, c, sizeof img), "a real table of %u sectors not taken", ns);
+    CHECK(ldr_table_ok(t, ns, c), "a real table of %u sectors not taken", ns);
     t[12] ^= 1;                                     /* (sector 2's CRC16) */
-    CHECK(!ldr_table_ok(t, ns, c, sizeof img), "a table with a wrong entry taken");
+    CHECK(!ldr_table_ok(t, ns, c), "a table with a wrong entry taken");
 
     printf("%s: ldr_table_test\n", fails ? "FAIL" : "ok");
     return fails != 0;
