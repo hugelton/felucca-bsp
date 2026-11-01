@@ -13,3 +13,7 @@ jobs:
         env:
           CC: clang
         run: tests/run_ldr_screen_test.sh
+      - name: Where the update loader erases and programs (every install path, power cuts, hostile packages and hosts)
+        env:
+          CC: clang
+        run: tests/run_ldr_bounds_test.sh
