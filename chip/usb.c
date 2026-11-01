@@ -28,7 +28,10 @@
  * stereo, 44.1 kHz, EP4 OUT isochronous adaptive). uac_service takes each packet into a ring (nested in the render
  * too); uac_play, after each render, adds it to the output, resampled to the I2S clock (~44,117.6 Hz): the ring's
  * fill steers the rate, so it neither runs dry nor overflows.
- * FELUCCA_USB_HOST=1 adds opt-in MIDI host mode; see docs/USB_HOST.md for the main-loop contract. */
+ * FELUCCA_USB_HOST=1 adds opt-in MIDI host mode; see docs/USB_HOST.md for the main-loop contract.
+ * FELUCCA_MSC=1 adds a disk mode: usb_msc_switch(1) drops off the bus and comes back as a USB mass-storage device
+ * (bulk-only transport, EP3 bulk in and out; nothing else: no MIDI, no audio) until usb_msc_switch(0). The poll
+ * only moves packets: the commands (SCSI) and the disk are the main loop's (usb_msc_read, usb_msc_send). */
 #include "fm1_usb.h"   /* registers (chip/) */
 /* Host is opt-in and excluded from update loaders, even with a global build flag. */
 #ifndef FELUCCA_USB_HOST
@@ -40,6 +43,13 @@
 #endif
 #ifndef FELUCCA_CDC
 #define FELUCCA_CDC 0
+#endif
+#ifndef FELUCCA_MSC
+#define FELUCCA_MSC 0
+#endif
+#ifdef FELUCCA_LOADER
+#undef FELUCCA_MSC
+#define FELUCCA_MSC 0
 #endif
 #ifndef FELUCCA_UAC
 #define FELUCCA_UAC 0
@@ -87,10 +97,26 @@ enum { S_FADDR = 0, S_POWER = 1, S_INTRTX1 = 2, S_INTRTX2 = 3, S_INTRRX1 = 4, S_
 static uint8_t ep0buf[64 + 4] __attribute__((aligned(4)));
 static uint8_t ep1tx[64] __attribute__((aligned(4)));
 static uint8_t ep1rx[64 + 4] __attribute__((aligned(4)));
-#if FELUCCA_CDC
-static uint8_t ep2tx[8] __attribute__((aligned(4)));
+#if FELUCCA_CDC || FELUCCA_MSC
 static uint8_t ep3tx[64] __attribute__((aligned(4)));
 static uint8_t ep3rx[64 + 4] __attribute__((aligned(4)));
+#endif
+#if FELUCCA_MSC
+/* disk mode: the host's bulk OUT bytes in a ring (the poll writes, the main loop reads); one segment going out at a
+ * time (the main loop's buffer, sent in 64-byte packets: a segment never shares a packet with the next) */
+#define MSI_N 2048u
+static uint8_t msc_in[MSI_N];
+static volatile uint32_t msi_w, msi_r;
+static const uint8_t *volatile msc_tx_p;
+static volatile uint32_t msc_tx_n;               /* bytes of the segment still to send */
+static volatile uint8_t msc_rx_pend, msc_resets;
+static uint8_t usb_msc_on;                       /* presented as a disk (read by the TIMER5 ISR) */
+#define USB_MSC_ON usb_msc_on
+#else
+#define USB_MSC_ON 0
+#endif
+#if FELUCCA_CDC
+static uint8_t ep2tx[8] __attribute__((aligned(4)));
 /* serial rings: in = host -> console (ISR writes), out = console -> host (ISR reads) */
 #define CI_N 256u
 #define CO_N 2048u
@@ -524,6 +550,18 @@ static uint8_t usb_cdc_on = FELUCCA_CDC_DEFAULT != 0;      /* the console is pre
 #endif
 #define UAC_AS_IF (AUD_IF + IF_AS)
 #define UAC_ASO_IF (AUD_IF + IF_ASO)        /* the output stream (FELUCCA_UAC_OUT) */
+#if FELUCCA_MSC
+/* disk mode: one interface, mass storage (SCSI transparent, bulk-only), EP3 OUT and IN bulk; its own bcdDevice (a
+ * changed device to the computer) and a serial number (the bulk-only transport asks for one) */
+static const uint8_t DEV_DESC_MSC[18] = {18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x09, 0x12, FELUCCA_USB_PID & 0xFF,
+                                         FELUCCA_USB_PID >> 8, 0x00, 0x0D, 1, 2, 3, 1};
+static const uint8_t CFG_DESC_MSC[32] = {D_CFG(32, 1),
+                                         9, 4, 0, 0, 2, 0x08, 0x06, 0x50, 0,   /* mass storage, SCSI, bulk-only */
+                                         7, 5, 0x03, 2, 64, 0, 0,              /* EP3 OUT bulk */
+                                         7, 5, 0x83, 2, 64, 0, 0};             /* EP3 IN bulk */
+static const uint8_t STR3_MSC[] = {26, 3, '0', 0, '0', 0, '0', 0, '0', 0, 'F', 0, 'M', 0, '1', 0, 'D', 0, 'I', 0, 'S', 0,
+                                   'K', 0, '1', 0};
+#endif
 static const uint8_t STR0[4] = {4, 3, 0x09, 0x04};
 static const uint8_t STR1[] = {42, 3, 'H', 0, 0xFC, 0, 'g', 0, 'e', 0, 'l', 0, 't', 0, 'o', 0, 'n', 0, ' ', 0, 'I', 0,
                                'n', 0, 's', 0, 't', 0, 'r', 0, 'u', 0, 'm', 0, 'e', 0, 'n', 0, 't', 0, 's', 0};
@@ -558,6 +596,25 @@ static int usb_str_desc(const char *s, const uint8_t **d, uint16_t *l)
 
 static int get_desc(uint32_t wvalue, const uint8_t **d, uint16_t *l)
 {
+#if FELUCCA_MSC
+    if (usb_msc_on) {
+        if ((wvalue >> 8) == 1) {
+            *d = DEV_DESC_MSC;
+            *l = 18;
+            return 1;
+        }
+        if ((wvalue >> 8) == 2) {
+            *d = CFG_DESC_MSC;
+            *l = sizeof CFG_DESC_MSC;
+            return 1;
+        }
+        if (wvalue == 0x0303u) {
+            *d = STR3_MSC;
+            *l = sizeof STR3_MSC;
+            return 1;
+        }
+    }
+#endif
     switch (wvalue >> 8) {
     case 1:
         *d = USB_CDC_ON ? DEV_DESC : DEV_DESC_PLAIN;
@@ -687,6 +744,24 @@ static void uac_rate_set(uint32_t hz)
     uac.r48 = r48;
     uac.acc = 0;
     uac.pkts = uac.frames = 0;                          /* the measured rate (console) starts again */
+}
+#endif
+
+#if FELUCCA_MSC
+static void msc_config(void)                            /* disk mode's SET_CONFIGURATION 1: EP3 bulk both ways */
+{
+    fm1_usb_ep_txbuf(3, ep3tx);
+    fm1_usb_ep_rxbuf(3, ep3rx);
+    sie_wr(S_INDEX, 3);
+    sie_wr(S_TXMAXP, 0xFF);
+    sie_wr(S_TXCSR1, 0x48);
+    sie_wr(S_TXCSR2, 0);
+    sie_wr(S_RXMAXP, 0xFF);
+    sie_wr(S_RXCSR1, 0x90);
+    sie_wr(S_RXCSR2, 0);
+    sie_wr(S_INTRRX1E, 0x08);
+    fm1_usb_ep_enable(1u << 3);
+    msc_rx_pend = 1;                                    /* look once: a packet may already wait */
 }
 #endif
 
@@ -857,6 +932,15 @@ static void ep0_service(void)
         if (s[2] > 1u)
             goto stall;
         usb.config = s[2];
+#if FELUCCA_MSC
+        if (usb_msc_on) {
+            if (usb.config == 1u)
+                msc_config();
+            else
+                sie_wr(S_INTRRX1E, 0);
+            goto ack;
+        }
+#endif
         if (usb.config == 1u) {
             ep1_config();
             midi_links++;
@@ -918,7 +1002,7 @@ static void ep0_service(void)
         e0_send(zero2, 1, wlength);
         return;
     case 0x0201: {                                      /* CLEAR_FEATURE(ENDPOINT_HALT): data toggle reset */
-        uint32_t ep = s[4] & 0x0Fu, last = USB_CDC_ON ? 3u : 1u;
+        uint32_t ep = s[4] & 0x0Fu, last = (USB_CDC_ON || USB_MSC_ON) ? 3u : 1u;
 #if FELUCCA_UAC
         if (wvalue == 0 && (s[4] == 0x84u || (FELUCCA_UAC_OUT && s[4] == 0x04u)))
             goto ack;                                   /* isochronous: no halt, no toggle */
@@ -934,6 +1018,20 @@ static void ep0_service(void)
         }
         goto ack;
     }
+#if FELUCCA_MSC
+    case 0xA1FE:                                        /* GET_MAX_LUN: one disk, LUN 0 */
+        if (!usb_msc_on)
+            goto stall;
+        e0_send(zero2, 1, wlength);
+        return;
+    case 0x21FF:                                        /* bulk-only mass storage reset */
+        if (!usb_msc_on)
+            goto stall;
+        msi_r = msi_w;
+        msc_tx_n = 0;
+        msc_resets++;
+        goto ack;
+#endif
 #if FELUCCA_CDC
     case 0x2120:                                        /* SET_LINE_CODING: 7 bytes follow */
         if (!usb_cdc_on)
@@ -1298,6 +1396,100 @@ static void ep3_tx(void)                                /* <= 63 bytes per packe
     fm1_usb_ep_send(3, ep3tx, n);
     sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
     cdc.tx_pkts++;
+}
+#endif
+
+#if FELUCCA_MSC
+static void msc_ep3_rx(void)                            /* leaves the packet (NAK) while the ring is too full */
+{
+    uint32_t csr, n, i;
+    sie_wr(S_INDEX, 3);
+    csr = sie_rd(S_RXCSR1) | (sie_rd(S_RXCSR2) << 8);
+    if (!(csr & 1u)) {
+        msc_rx_pend = 0;
+        return;
+    }
+    n = sie_rd(S_RXCOUNT1) | (sie_rd(S_RXCOUNT2) << 8);
+    if (n > 64u)
+        n = 64u;
+    if (MSI_N - (msi_w - msi_r) < n)
+        return;                                         /* rx_pend stays: retried next poll */
+    msc_rx_pend = 0;
+    fm1_usb_rx_sync();
+    for (i = 0; i < n; i++)
+        msc_in[(msi_w + i) % MSI_N] = ep3rx[i];
+    RING_PUBLISH();
+    msi_w += n;
+    csr = (csr & ~0x164u) | 0x10u;
+    sie_wr(S_RXCSR1, csr & 0xFFu);
+    sie_wr(S_RXCSR2, csr >> 8);
+}
+
+static void msc_ep3_tx(void)                            /* the segment's next packet, once the last one is gone */
+{
+    uint32_t csr, n, i;
+    const uint8_t *p = msc_tx_p;
+    if (!msc_tx_n)
+        return;
+    sie_wr(S_INDEX, 3);
+    csr = sie_rd(S_TXCSR1);
+    if (csr & 0x01u)
+        return;
+    if (csr & 0x80u)
+        sie_wr(S_TXCSR1, csr & ~0x80u);
+    n = msc_tx_n > 64u ? 64u : msc_tx_n;
+    for (i = 0; i < n; i++)
+        ep3tx[i] = p[i];
+    fm1_usb_ep_send(3, ep3tx, n);
+    sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
+    msc_tx_p = p + n;
+    RING_PUBLISH();
+    msc_tx_n -= n;
+}
+
+/* the main loop's side of disk mode */
+static int usb_msc_ready(void) { return usb_msc_on && usb.up && usb.config == 1u; }
+static uint32_t usb_msc_avail(void) { return msi_w - msi_r; }
+static uint32_t usb_msc_read(uint8_t *d, uint32_t max)  /* bytes from the host (bulk OUT), at most max */
+{
+    uint32_t n = msi_w - msi_r, i;
+    if (n > max)
+        n = max;
+    for (i = 0; i < n; i++)
+        d[i] = msc_in[(msi_r + i) % MSI_N];
+    RING_PUBLISH();
+    msi_r += n;
+    return n;
+}
+static int usb_msc_busy(void) { return msc_tx_n != 0; }
+static int usb_msc_send(const uint8_t *p, uint32_t n)   /* a segment to the host (p kept until !usb_msc_busy) */
+{
+    if (msc_tx_n || !n)
+        return -1;
+    msc_tx_p = p;
+    RING_PUBLISH();
+    msc_tx_n = n;
+    return 0;
+}
+static uint32_t usb_msc_resets(void) { return msc_resets; }
+
+/* present the FM-1 as a disk (on) or as itself (off): main loop. As usb_cdc_switch: a change while attached drops
+ * off the bus, and usb_retry attaches again within a second with the other descriptors */
+static __attribute__((unused)) void usb_msc_switch(uint32_t on)
+{
+    on = on != 0;
+    if (on == usb_msc_on)
+        return;
+    if (usb.up) {
+        usb.up = 0;                                     /* usb_poll (TIMER5) stops before the SIE goes */
+        RING_PUBLISH();
+        fm1_usb_off();
+    }
+    usb.config = 0;
+    msi_r = msi_w;
+    msc_tx_n = 0;
+    msc_rx_pend = 0;
+    usb_msc_on = (uint8_t)on;
 }
 #endif
 
@@ -1680,6 +1872,11 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
         cdc.e0_rx = 0;
         cdc.rx_pend = 0;
 #endif
+#if FELUCCA_MSC
+        msi_r = msi_w;
+        msc_tx_n = 0;
+        msc_rx_pend = 0;
+#endif
 #if FELUCCA_UAC
         uac.e0_rx = 0;
         uac_stream(0);
@@ -1695,6 +1892,18 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
     }
     if (it & 0x01u)
         ep0_service();
+#if FELUCCA_MSC
+    if (usb_msc_on) {                                   /* disk mode: EP3 only */
+        if (usb.config) {
+            if (ir & 0x08u)
+                msc_rx_pend = 1;
+            if (msc_rx_pend)
+                msc_ep3_rx();
+            msc_ep3_tx();
+        }
+        return;
+    }
+#endif
     if (ir & 0x02u)
         usb.rx_pend = 1;
     if (usb.rx_pend)                                    /* not every poll: 3 SIE round trips each */

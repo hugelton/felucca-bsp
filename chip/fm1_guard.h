@@ -88,6 +88,20 @@ static void fm1_guard_enable(uint32_t which)
     fm1__dbg_lock();
 }
 
+/* the RAM code window from .ram_text's start up to hi (exclusive): code a firmware loads into RAM at run time (a
+ * plug-in in the pool) may then run. The window covers everything between (.data, .bss, the pool below hi), so a
+ * firmware asks for it only when it loads code; the XIP window and the other guards stay as they are */
+static void fm1_guard_pc_extend(uint32_t hi)
+{
+    volatile uint32_t rs = (uint32_t)(uintptr_t)_rt_start;
+    if (hi <= rs)
+        return;
+    fm1__dbg_unlock();
+    FM1_PC_LIMIT1_L = rs;
+    FM1_PC_LIMIT1_H = hi - 1u;
+    fm1__dbg_lock();
+}
+
 /* write-protect 0x01C7FD50..0x01C7FFFF (boot info, mailbox, vectors):
  * call after the last fm1_irq_attach */
 static void fm1_guard_lock_top(void)
