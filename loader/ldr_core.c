@@ -52,6 +52,14 @@
 #define LDR_DATA_HI 0xE0000u                    /* bytes (user samples) the host writes */
 #define LDR_NSEC ((LDR_APP_HI - LDR_APP_LO) >> 12)
 #define LDR_FL_MAX 0x100000u                    /* flash.bin: at most the 1 MiB part */
+/* the build's values are the only addresses the loader erases from: never past the store, into the staged loader and
+ * its record (0xE0000, ota.c OTA_AREA); tests/ldr_bounds_test.c */
+_Static_assert(FL_APP_END > LDR_APP_LO && FL_APP_END <= LDR_DATA_HI && !(FL_APP_END & 0xFFFu),
+               "FL_APP_END: a 4 KiB boundary in (0x4000, 0xE0000]");
+#ifdef LDR_CLEAR_END
+_Static_assert(LDR_CLEAR_END <= LDR_DATA_HI && !(LDR_CLEAR_END & 0xFFFu),
+               "LDR_CLEAR_END: a 4 KiB boundary at or below 0xE0000 (the staged loader above)");
+#endif
 
 static int ldr_fread(uint32_t off, void *p, uint32_t n);
 static int ldr_erase(uint32_t off);
