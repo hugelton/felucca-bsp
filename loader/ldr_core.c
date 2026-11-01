@@ -252,8 +252,13 @@ static int ldr_classic(void)
  *   3'.  a sector whose flash already has both CRCs is kept and never sent; any other one is erased while it comes in
  *        (one 4 KiB read), checked against both CRCs (three tries: never written otherwise), programmed and verified
  *        byte for byte. A cut-off install resumes the same way: what was written already is skipped.
+ *        The host learns how far the comparison is (cmd 0x32, ldr_check_note): its bar moves over the sectors kept,
+ *        which it is never asked for (a resumed install: most of them).
  * A flash.bin that is not whole sectors goes the classic way. */
 #define LDR_FAST_CMD 0x31u
+#define LDR_CHECK_CMD 0x32u                     /* [sectors compared, all sectors: 16-bit LE each], to the host */
+#define LDR_CHECK_EVERY 8u                      /* at most a 0x32 frame every 8 sectors ... */
+#define LDR_CHECK_MS 100u                       /* ... or 100 ms, and the last */
 #define LDR_TBL 0xD0000000u
 #define LDR_NMAX (LDR_FL_MAX >> 12)
 _Static_assert(LDR_FAST_CHUNK == 0x1000u && LDR_NMAX * 6u <= LDR_FAST_CHUNK, "one read per sector, the table in one");
@@ -314,11 +319,22 @@ static int ldr_fetch(uint32_t src, uint8_t *b, const uint8_t *t)
     return -13;                                          /* it came in different three times: not written */
 }
 
+/* cmd 0x32 [k sectors of the app area compared, of n: 16-bit LE each]: queued, sent by the USB polls (ldr_progress) */
+static void ldr_check_note(uint32_t k, uint32_t n)
+{
+    uint8_t b[4];
+    b[0] = (uint8_t)k;
+    b[1] = (uint8_t)(k >> 8);
+    b[2] = (uint8_t)n;
+    b[3] = (uint8_t)(n >> 8);
+    ota_send_msg(LDR_CHECK_CMD, b, 4);
+}
+
 static int ldr_fast(void)
 {
     static uint8_t tbl[LDR_NMAX * 6u];
     uint8_t *const hdr = ldr_hdr, *const sec = ldr_sec, *const cur = ldr_cur;
-    uint32_t fl_off, fl_size, key, s, want, n, done = 0;
+    uint32_t fl_off, fl_size, key, s, want, n, done = 0, k, note_k = 0, note_ms;
     int rc;
     if ((rc = ldr_head(hdr, sec, &fl_off, &fl_size, &want, &key)) != 0)
         return rc;
@@ -330,6 +346,7 @@ static int ldr_fast(void)
     if (!ldr_table_ok(tbl, n, want, sec))
         return -12;                                      /* nothing erased */
     ldr_progress(fl_size, fl_size + (LDR_APP_HI - LDR_APP_LO));
+    note_ms = ota_now_ms();
     for (s = LDR_APP_LO; s < LDR_APP_HI; s += 0x1000u) {
         const uint8_t *t = tbl + (s >> 12) * 6u;
         if (ldr_fread(s, cur, 0x1000u))
@@ -346,6 +363,12 @@ static int ldr_fast(void)
                 return rc;
         }
         done += 0x1000u;
+        k = done >> 12;
+        if (k == LDR_NSEC || k - note_k >= LDR_CHECK_EVERY || ota_now_ms() - note_ms >= LDR_CHECK_MS) {
+            note_k = k;
+            note_ms = ota_now_ms();
+            ldr_check_note(k, LDR_NSEC);
+        }
         ldr_progress(fl_size + done, fl_size + (LDR_APP_HI - LDR_APP_LO));
     }
     return ldr_finish(sec);
