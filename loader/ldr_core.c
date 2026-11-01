@@ -323,17 +323,24 @@ static uint32_t ldr_crc32(const uint8_t *p, uint32_t n)   /* zlib's */
     return ~c;
 }
 
-static int ldr_table_ok(const uint8_t *t, uint32_t n, uint32_t want, uint8_t *zero)
+/* the CRC16 (ota_crc16's) of 4 KiB of zeros from c. CCITT's polynomial is (x + 1) times a primitive one of degree 15, so
+ * x^32767 = 1 and 32768 zero bits move the register as one bit does: one step, not 32768 (ota_crc16 over 4096 zero
+ * bytes ran ~46 instructions a byte: ~48 M for a 1 MiB flash.bin before the bar moved; tests/ldr_table_test.c: the same
+ * as ota_crc16) */
+static uint32_t ldr_zeros4k(uint32_t c)
 {
-    uint32_t k, i, c = 0;
-    for (k = 0; k < 0x200u; k++)
-        zero[k] = 0;
+    return (c & 0x8000u ? (c << 1) ^ 0x1021u : c << 1) & 0xFFFFu;
+}
+
+/* the table's CRC16s combined: the UFW entry's CRC16 of the whole flash.bin. The bar moves over it (the first part of
+ * ldr_progress's scale: flash.bin; total, the whole scale) */
+static int ldr_table_ok(const uint8_t *t, uint32_t n, uint32_t want, uint32_t total)
+{
+    uint32_t k, c = 0;
     for (k = 0; k < n; k++) {                            /* crc(A || B) = crc(A shifted over |B| zeros) ^ crc(B) */
-        for (i = 0; i < 0x1000u; i += 0x200u)
-            c = ota_crc16(zero, 0x200u, c);
-        c ^= ota_rd16(t + k * 6u);
+        c = ldr_zeros4k(c) ^ ota_rd16(t + k * 6u);
         if (!(k & 31u))
-            ota_idle();
+            ldr_progress(k << 12, total);
     }
     return c == want;
 }
@@ -380,7 +387,7 @@ static int ldr_fast(void)
     n = fl_size >> 12;
     if (ota_read(LDR_TBL + fl_off, tbl, n * 6u))
         return -7;
-    if (!ldr_table_ok(tbl, n, want, sec))
+    if (!ldr_table_ok(tbl, n, want, fl_size + (LDR_APP_HI - LDR_APP_LO)))
         return -12;                                      /* nothing erased */
     ldr_progress(fl_size, fl_size + (LDR_APP_HI - LDR_APP_LO));
 #if defined(LDR_SLOT_SWITCH) && LDR_SLOT_SWITCH
