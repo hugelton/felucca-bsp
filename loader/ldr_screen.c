@@ -1,36 +1,65 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Charles Vestal */
-/* The update loader's screen: "UPDATING", "DO NOT UNPLUG" (smaller) and a bar that fills as the app area is written
- * (ldr_progress), in the installer page's colours. The panel is started as the app's lcd.c does (fm1-base
- * device/lcd.c: reset, sleep out, RGB565, IPS inversion), polled, at Felucca's SPI1 rate (BAUD 4).
+/* The update loader's screen: "UPDATING", "DO NOT UNPLUG" (smaller), a bar that fills as the app area is written
+ * (ldr_progress) and its percentage under it, in the installer page's colours. Mid-install, a host silent for 2 s
+ * (ldr_screen_tick, ldr_screen_heard: a cable that dropped, a host gone) turns the lines to "USB LOST", "RECONNECT",
+ * the bar and the percentage kept; the host's next frame turns them back (the loader resumes: what is written is
+ * skipped). At the end (ldr_screen_done): "DONE", "RESTARTING". Drawn only when something changes: a state, a bar
+ * pixel, a percent. The panel is started as the app's lcd.c does (fm1-base device/lcd.c: reset, sleep out, RGB565,
+ * IPS inversion), polled, at Felucca's SPI1 rate (BAUD 4).
  * Part of loader.c's single unit; every buffer is in RAM (the SPI DMA reads RAM only). */
+#ifndef LDR_SCREEN_TEST                             /* (tests/ldr_screen_test.c brings a model of the panel) */
 #include "../boards/fm1/fm1_lcd_hw.h"
+#endif
 
 #define SCR_BG 0xFFBDu                              /* #faf4e8 cream */
 #define SCR_FG 0x49C5u                              /* #48392f brown */
 #define SCR_BAR 0xBA43u                             /* #b84a1e coral */
 #define SCR_TRACK 0xEEF9u                           /* #e8dcc8, the empty bar */
+#define SCR_BIG_Y 76u
+#define SCR_SMALL_Y 110u
 #define SCR_BAR_X 30u
 #define SCR_BAR_Y 150u
 #define SCR_BAR_W 180u
 #define SCR_BAR_H 12u
+#define SCR_PC_Y 172u
 #define SCR_ROWS 21u                                /* the tallest line: 5x7 glyphs at 3x */
+#define SCR_LOST_POLLS 4000u                        /* 2 s of loader.c's 0.5 ms USB polls without a frame */
 
 static uint16_t scr_strip[240u * SCR_ROWS];         /* one line of text, byte-swapped (the panel takes MSB first) */
 static uint8_t scr_small[8];
 static uint32_t scr_shown;                          /* bar pixels drawn */
-static uint8_t scr_on;
+static uint32_t scr_pc;                             /* the percentage drawn */
+static uint32_t scr_quiet;                          /* polls since the host's last frame */
+static uint8_t scr_on, scr_armed;                   /* armed: an install has started */
+static uint8_t scr_state;                           /* 0 updating, 1 USB lost, 2 done */
 
 /* 5x7 glyphs, a row a byte (bit 4 = left) */
 static const struct { char c; uint8_t rows[7]; } SCR_FONT[] = {
+    { '0', { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E } },
+    { '1', { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E } },
+    { '2', { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F } },
+    { '3', { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E } },
+    { '4', { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 } },
+    { '5', { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E } },
+    { '6', { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E } },
+    { '7', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 } },
+    { '8', { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E } },
+    { '9', { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C } },
+    { '%', { 0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03 } },
     { 'A', { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } },
+    { 'B', { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E } },
+    { 'C', { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E } },
     { 'D', { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E } },
+    { 'E', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F } },
     { 'G', { 0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F } },
     { 'I', { 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E } },
     { 'L', { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F } },
     { 'N', { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 } },
     { 'O', { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
     { 'P', { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 } },
+    { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 } },
+    { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
     { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
     { 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
 };
@@ -77,13 +106,18 @@ static void scr_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t c)
     }
 }
 
-static void scr_text(uint32_t y, const char *s, uint32_t scale)   /* one line, centred; scale <= 3 */
+/* one line, centred in a box of cols characters (or its own length if longer), the box cleared: a shorter line put
+ * over a longer one of the same box leaves nothing behind; scale <= 3 */
+static void scr_text(uint32_t y, const char *s, uint32_t scale, uint32_t cols)
 {
-    uint32_t len = 0, i, r, b, sx, sy, x0, w;
+    uint32_t len = 0, i, r, b, sx, sy, x0, w, pad;
     while (s[len])
         len++;
-    w = len * 6u * scale - scale;
+    if (cols < len)
+        cols = len;
+    w = cols * 6u * scale - scale;
     x0 = (240u - w) / 2u;
+    pad = (cols - len) * 6u * scale / 2u;
     for (i = 0; i < w * 7u * scale; i++)
         scr_strip[i] = scr_swap(SCR_BG);
     for (i = 0; i < len; i++) {
@@ -99,10 +133,29 @@ static void scr_text(uint32_t y, const char *s, uint32_t scale)   /* one line, c
                 if (g[r] & (0x10u >> b))
                     for (sy = 0; sy < scale; sy++)
                         for (sx = 0; sx < scale; sx++)
-                            scr_strip[(r * scale + sy) * w + (i * 6u + b) * scale + sx] = scr_swap(SCR_FG);
+                            scr_strip[(r * scale + sy) * w + pad + (i * 6u + b) * scale + sx] = scr_swap(SCR_FG);
     }
     scr_window(x0, y, x0 + w - 1u, y + 7u * scale - 1u);
     scr_data(scr_strip, w * 7u * scale * 2u);
+}
+
+static void scr_lines(const char *big, const char *small)
+{
+    scr_text(SCR_BIG_Y, big, 3, 8);                 /* "UPDATING", "USB LOST", "DONE" */
+    scr_text(SCR_SMALL_Y, small, 2, 13);            /* "DO NOT UNPLUG", "RECONNECT", "RESTARTING" */
+}
+
+static void scr_percent(uint32_t pc)                /* "0%" .. "100%" */
+{
+    char t[5], *p = t;
+    if (pc >= 100u)
+        *p++ = '1';
+    if (pc >= 10u)
+        *p++ = (char)('0' + pc / 10u % 10u);
+    *p++ = (char)('0' + pc % 10u);
+    *p++ = '%';
+    *p = 0;
+    scr_text(SCR_PC_Y, t, 2, 4);
 }
 
 static void ldr_screen_init(void)
@@ -122,21 +175,57 @@ static void ldr_screen_init(void)
     scr_cmd(0x21);                                  /* INVON: IPS panel */
     scr_cmd(0x13);                                  /* NORON */
     scr_fill(0, 0, 240, 240, SCR_BG);
-    scr_text(76, "UPDATING", 3);
-    scr_text(110, "DO NOT UNPLUG", 2);
+    scr_lines("UPDATING", "DO NOT UNPLUG");
     scr_fill(SCR_BAR_X, SCR_BAR_Y, SCR_BAR_W, SCR_BAR_H, SCR_TRACK);
+    scr_percent(0);
     scr_cmd(0x29);                                  /* DISPON */
     scr_on = 1;
 }
 
+/* the bar and the percentage only grow: a resumed install starts below what is shown and keeps it */
 static void ldr_screen_progress(uint32_t done, uint32_t total)
 {
-    uint32_t px;
+    uint32_t px, pc;
     if (!scr_on || !total)
         return;
+    scr_armed = 1;
     px = done >= total ? SCR_BAR_W : done * SCR_BAR_W / total;     /* < 2^32: total <= 2 MiB */
-    if (px <= scr_shown)
+    pc = done >= total ? 100u : done * 100u / total;
+    if (px > scr_shown) {
+        scr_fill(SCR_BAR_X + scr_shown, SCR_BAR_Y, px - scr_shown, SCR_BAR_H, SCR_BAR);
+        scr_shown = px;
+    }
+    if (pc > scr_pc) {
+        scr_percent(pc);
+        scr_pc = pc;
+    }
+}
+
+/* a frame from the host (cheap: called for each one) */
+static void ldr_screen_heard(void)
+{
+    scr_quiet = 0;
+    if (scr_state == 1u) {
+        scr_state = 0;
+        scr_lines("UPDATING", "DO NOT UNPLUG");
+    }
+}
+
+/* one USB poll (0.5 ms) without a frame: an install whose host stays silent 2 s is shown lost, once */
+static void ldr_screen_tick(void)
+{
+    if (!scr_on || !scr_armed || scr_state || ++scr_quiet < SCR_LOST_POLLS)
         return;
-    scr_fill(SCR_BAR_X + scr_shown, SCR_BAR_Y, px - scr_shown, SCR_BAR_H, SCR_BAR);
-    scr_shown = px;
+    scr_state = 1;
+    scr_lines("USB LOST", "RECONNECT");
+}
+
+/* written and verified: the app starts next */
+static void ldr_screen_done(void)
+{
+    if (!scr_on)
+        return;
+    ldr_screen_progress(1, 1);
+    scr_state = 2;
+    scr_lines("DONE", "RESTARTING");
 }
