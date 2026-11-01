@@ -205,6 +205,32 @@ int main(void)
     ldr_screen_done();
     screen("DONE", "RESTARTING", "100%", SCR_BAR_W, __LINE__);
 
+    /* the fast install's calls (loader/ldr_core.c ldr_fast): the table checked, then every app sector, kept or written,
+     * one step: the bar and the percentage move over the sectors compared, not only the ones sent */
+    {
+        const uint32_t fl = 0x93000u, app = 0x93000u - 0x4000u, total = fl + app;
+        uint32_t k, moved = 0, last_pc = 0;
+        clear();
+        scr_on = 0, scr_shown = 0, scr_pc = 0, scr_state = 0, scr_armed = 0, scr_quiet = 0;
+        ldr_screen_init();
+        ldr_screen_progress(0, 1);
+        ldr_screen_progress(fl, total);
+        for (k = 1; k <= app >> 12; k++) {
+            uint32_t done = fl + (k << 12), pc = done * 100u / total;
+            char want[8];
+            ldr_screen_progress(done, total);
+            snprintf(want, sizeof want, "%u%%", pc);
+            if (!line_is(SCR_PC_Y, want, 2) || bar_px() != (k == app >> 12 ? SCR_BAR_W : done * SCR_BAR_W / total)) {
+                CHECK(0, "fast install, sector %u: not %s / its bar", k, want);
+                break;
+            }
+            moved += pc != last_pc;
+            last_pc = pc;
+        }
+        CHECK(moved >= 45u, "the percentage moved %u times over the sectors", moved);
+        screen("UPDATING", "DO NOT UNPLUG", "100%", SCR_BAR_W, __LINE__);
+    }
+
     printf("%s: ldr_screen_test\n", fails ? "FAIL" : "ok");
     return fails != 0;
 }
