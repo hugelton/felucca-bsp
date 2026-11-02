@@ -79,7 +79,7 @@ static void devices_init(void)
 }
 
 /* --------------------------------------------------- the SIE and bus --- */
-static uint8_t regs[4][32], common[16], index_reg, rsp[512];
+static uint8_t regs[5][32], common[16], index_reg, rsp[512];
 static uint32_t rsp_len, rsp_pos, ep_cnt[5];
 static void *ep_radr[5];
 static void *ep_tadr[5];
