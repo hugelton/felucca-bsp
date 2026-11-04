@@ -128,13 +128,21 @@ static int ota_send_msg(uint32_t cmd, const uint8_t *body, uint32_t n)   /* n <=
     return ota_wire_send(ota_wire, w);
 }
 
+/* the flash's JEDEC ID for the identity reply (a firmware defines it before including this file: the ID it read at
+ * boot), 0: not read */
+#ifndef OTA_FLASH_ID
+#define OTA_FLASH_ID() 0u
+#endif
 static void ota_reply_identity(void)
 {
     static const char ID[] = FELUCCA_ID;         /* == the package marker string */
     uint8_t id[27];
-    uint32_t i;
+    uint32_t i, j = OTA_FLASH_ID();
     for (i = 0; i < sizeof id; i++)
         id[i] = i < sizeof ID - 1u ? (uint8_t)ID[i] : 0;
+    id[24] = (uint8_t)(j >> 16);                 /* bytes 24..26: the JEDEC ID (installers read the text up to its */
+    id[25] = (uint8_t)(j >> 8);                  /* first 0; ID is shorter than 24) */
+    id[26] = (uint8_t)j;
     ota_send_msg(0x11, id, sizeof id);
 }
 
