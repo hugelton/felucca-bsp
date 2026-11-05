@@ -44,6 +44,11 @@ FM1_INLINE uint32_t fm1_flash_core(void)
 #endif
 
 static volatile uint32_t fm1_flash_cpu1_idle;
+#if FM1_CPU1                                    /* what the gate below was built with (fm1_cpu1.h checks it) */
+#define FM1_FLASH_GATE_CPU1 1
+#else
+#define FM1_FLASH_GATE_CPU1 0
+#endif
 
 FM1_INLINE uint32_t irq_save(void)
 {
@@ -72,7 +77,7 @@ FM1_INLINE int fm1_flash_access_ok(void)
 {
     if (FM1_FLASH_CORE() != 0 || (FM1_FLASH_ICFG_READ() & 0x300u) == 0x300u)
         return 0;
-#if FM1_CPU1
+#if FM1_FLASH_GATE_CPU1
     {
         uint32_t c;
         FM1_FLASH_SYNC();

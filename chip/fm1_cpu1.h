@@ -49,8 +49,11 @@
 #pragma once
 #include <stdint.h>
 #include "fm1_cc.h"
-#if !FM1_CPU1
-#error "fm1_cpu1.h: define FM1_CPU1 1 before the first BSP header (fm1_irq.h and the flash gate, fm1_flash_access.h, check it)"
+#if defined(FM1_FLASH_GATE_CPU1) && !FM1_FLASH_GATE_CPU1
+#error "fm1_cpu1.h: the flash gate (fm1_flash_access.h) was built without FM1_CPU1: define FM1_CPU1 1 before the first BSP header"
+#endif
+#ifndef FM1_CPU1
+#define FM1_CPU1 1                                /* (fm1_irq.h and the flash gate check it) */
 #endif
 #include "fm1_time.h"
 #include "fm1_irq.h"
