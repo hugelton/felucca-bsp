@@ -30,7 +30,9 @@
  *   ota_show(step, code)       progress / result for the screen
  *   ota_commit(parm)           write RAM record + reset (never returns on hardware)
  */
-#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB */
+#ifndef OTA_AREA
+#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB (the FM-1's; a board's fm1_flash.h FL_OTA_LO) */
+#endif
 #define OTA_AREA_LEN 0x5000u
 #define OTA_RES (OTA_AREA + OTA_AREA_LEN - 0x100u)  /* 0xE4F00 = 4K boundary - 256: SPL scan */
 #ifndef OTA_FRAME_MAX

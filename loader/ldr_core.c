@@ -36,13 +36,32 @@
  *                              the fast install: the table's bytes, then each app sector compared or written
  *   with LDR_FAST_CHUNK (the fast install, ldr_fast below): ldr_erase_begin(off) ldr_erase_end(), an erase while a
  *   sector comes in (no flash access between)
- * plus the ota.c hooks (frames, time, idle). */
+ * plus the ota.c hooks (frames, time, idle).
+ * The windows are the FM-1's; a board's loader build (loader.c LDR_SMK37: the SMK-37) defines its own before this,
+ * and with LDR_LAYOUT refuses a package not laid out for it (2a, below), before anything is erased. */
 #define LDR_APP_LO 0x4000u
+#ifndef LDR_APP_HI
 #define LDR_APP_HI 0x93000u
+#endif
+#ifndef LDR_REC_LO
 #define LDR_REC_LO 0x93000u                     /* update records live above the app ... */
+#endif
+#ifndef LDR_REC_HI
 #define LDR_REC_HI 0xFC000u                     /* ... and below Felucca's globals (Felucca's records: 0xE4F00, */
+#endif
+#ifndef LDR_DATA_LO
 #define LDR_DATA_LO 0x97000u                    /* the stock firmware's: 0xE8F00), never in Felucca's store, whose */
+#endif
+#ifndef LDR_DATA_HI
 #define LDR_DATA_HI 0xE0000u                    /* bytes (user samples) the host writes */
+#endif
+#ifndef LDR_SKIP
+#define LDR_SKIP(lo) 0                          /* a board's sectors the record scan must never erase (the SMK's BTIF) */
+#endif
+#ifndef LDR_LAYOUT
+#define LDR_LAYOUT 0                            /* 1: the package must be laid out for this board (flash.bin's size,
+                                                 * the app slot, the VM descriptor: -15, -16, -17), before any erase */
+#endif
 #define LDR_NSEC ((LDR_APP_HI - LDR_APP_LO) >> 12)
 #define LDR_FL_MAX 0x100000u                    /* flash.bin: at most the 1 MiB part */
 
@@ -164,6 +183,27 @@ static int ldr_head(uint8_t *hdr, uint8_t *b, uint32_t *fl_off, uint32_t *fl_siz
     ldr_sfc(b, 32, 0, *key);
     if (ota_crc16(b + 2, 30, 0) != ota_rd16(b))
         return -6;                                       /* package for another chip key */
+#if LDR_LAYOUT
+    /* 2a. laid out for this board? flash.bin's size is the board's app area with its head; app.bin's entry (at
+     * 0x20 of the app area, its size at +8) is the board's slot; the VM descriptor sits where the board's does.
+     * Both installs take this (the classic and the fast), so nothing is erased for another board's package */
+    if (*fl_size != LDR_APP_HI)
+        return -15;
+    if (ota_read(*fl_off + LDR_APP_LO, b, 0x100u))
+        return -5;
+    ldr_sfc(b, 0x100u, 0, *key);
+    if (ota_rd32(b + 0x20 + 8) != LDR_APP_SLOT)
+        return -16;
+    for (i = 0x40u; ; i += 32u) {
+        if (i >= 0x100u)
+            return -17;
+        if (ota_memeq(b + i + 16, (const uint8_t *)"VM", 3)) {
+            if (ota_rd32(b + i + 4) != LDR_VM_OFF)
+                return -17;
+            break;
+        }
+    }
+#endif
     return 0;
 }
 
@@ -195,7 +235,7 @@ static int ldr_finish(uint8_t *b)
     ldr_record_clear();
     for (s = LDR_REC_HI; s > LDR_REC_LO; s -= 0x1000u) {   /* flash records: 4K boundary - 256 */
         uint8_t r[80];
-        if (s - 0x1000u >= LDR_DATA_LO && s - 0x1000u < LDR_DATA_HI)
+        if ((s - 0x1000u >= LDR_DATA_LO && s - 0x1000u < LDR_DATA_HI) || LDR_SKIP(s - 0x1000u))
             continue;                                    /* Felucca's store: user data that may look like one */
         if (ldr_fread(s - 0x100u, r, 80))
             break;
