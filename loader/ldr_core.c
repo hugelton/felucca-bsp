@@ -55,9 +55,6 @@
 #ifndef LDR_DATA_HI
 #define LDR_DATA_HI 0xE0000u                    /* bytes (user samples) the host writes */
 #endif
-#ifndef LDR_SKIP
-#define LDR_SKIP(lo) 0                          /* a board's sectors the record scan must never erase (the SMK's BTIF) */
-#endif
 #ifndef LDR_LAYOUT
 #define LDR_LAYOUT 0                            /* 1: the package must be laid out for this board (flash.bin's size,
                                                  * the app slot, the VM descriptor: -15, -16, -17), before any erase */
@@ -235,7 +232,7 @@ static int ldr_finish(uint8_t *b)
     ldr_record_clear();
     for (s = LDR_REC_HI; s > LDR_REC_LO; s -= 0x1000u) {   /* flash records: 4K boundary - 256 */
         uint8_t r[80];
-        if ((s - 0x1000u >= LDR_DATA_LO && s - 0x1000u < LDR_DATA_HI) || LDR_SKIP(s - 0x1000u))
+        if (s - 0x1000u >= LDR_DATA_LO && s - 0x1000u < LDR_DATA_HI)
             continue;                                    /* Felucca's store: user data that may look like one */
         if (ldr_fread(s - 0x100u, r, 80))
             break;

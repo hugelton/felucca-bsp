@@ -25,7 +25,7 @@
 #define FM1_UT1_CON0   (*(volatile uint32_t *)0x12100u)
 #define FM1_UT1_CON1   (*(volatile uint32_t *)0x12104u)
 #define FM1_UT1_BAUD   (*(volatile uint32_t *)0x12108u)
-#define FM1_UT1_BUF    (*(volatile uint32_t *)0x1210Cu)
+#define FM1_UT1_BUF    (*(volatile uint8_t *)0x1210Cu)
 #define FM1_UM_CLK_CON1  (*(volatile uint32_t *)0x10010u)   /* [11:10] UART clock: 1 = PLL48M */
 #define FM1_UM_IOMAP3    (*(volatile uint32_t *)0x51028u)   /* UT1: b7 fixed IO, [23:20] TX output select */
 #define FM1_UM_PC_OUT    (*(volatile uint32_t *)0x50080u)
@@ -55,6 +55,7 @@ FM1_INLINE void fm1_uart1_tx_init(void)
     FM1_UT1_BAUD = 48000000u / 31250u / 4u - 1u;            /* 383 */
     __asm__ volatile("csync" ::: "memory");
     FM1_UT1_CON0 |= 1u;                                     /* UTEN; no RX, no interrupts */
+    __asm__ volatile("csync" ::: "memory");
     fm1_uart1_sent = 0;
 }
 
@@ -64,6 +65,7 @@ FM1_INLINE void fm1_uart1_tx_byte(uint8_t b)
 {
     FM1_UT1_CON0 |= FM1_UT1_CLR_TPND;
     FM1_UT1_BUF = b;
+    __asm__ volatile("csync" ::: "memory");
     fm1_uart1_sent = 1;
 }
 
