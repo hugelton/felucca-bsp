@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
 /* Actual low-level driver, with register/CPU primitives replaced. Verify that
- * invalid requests and unsafe contexts return before touching the bus. */
+ * invalid requests and unsafe contexts return before touching the bus. Built
+ * with -Ichip (the FM-1's layout) and with -Iboards/smk37 first (the SMK-37's
+ * map: its regions, its plain window from 0x9D000); W is a writable sector. */
 #include <stdint.h>
 #ifndef FM1_CPU1
 #define FM1_CPU1 1
@@ -40,6 +42,7 @@ static volatile uint32_t *reg32(uint32_t a)
 /* Mach-O does not accept the target's ELF section name. */
 #define RAMFN __attribute__((noinline))
 #include "fm1_flash.h"
+#define W FL_DATA_LO                               /* the store's first sector: 0x97000 (FM-1), 0xC2000 (SMK-37) */
 
 static unsigned checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { printf("FAIL %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -64,9 +67,9 @@ static void refused(int expected)
     uint32_t before[9], state = cfg;
     uint8_t before_enc = enc;
     memcpy(before, regs, sizeof before);
-    CHECK(fl_erase4k_ram(0x97000u, TOOK) == expected);
-    CHECK(fl_erase4k_begin_ram(0x97000u, SAVED, ISSUED) == expected);   /* the update loader's split erase */
-    CHECK(fl_prog_ram(0x97000u, RAM(0x1C20000u), 16, TOOK) == expected);
+    CHECK(fl_erase4k_ram(W, TOOK) == expected);
+    CHECK(fl_erase4k_begin_ram(W, SAVED, ISSUED) == expected);   /* the update loader's split erase */
+    CHECK(fl_prog_ram(W, RAM(0x1C20000u), 16, TOOK) == expected);
     CHECK(fl_read_ram(0, RAM(0x1C20000u), 16) == expected);
     CHECK(fl_uid_ram(RAM(0x1C20000u)) == expected);
     CHECK(fl_jedec_ram() == 0);
@@ -90,22 +93,33 @@ int main(void)
     refused(FL_ERR_MODE); /* unsupported XIP mode */
     reset();
     memcpy(before, regs, sizeof before);
-    CHECK(fl_erase4k_ram(0x97001u, TOOK) == FL_ERR_RANGE);
+    CHECK(fl_erase4k_ram(W + 1u, TOOK) == FL_ERR_RANGE);
     CHECK(fl_erase4k_ram(0x4000u, TOOK) == FL_ERR_RANGE);
-    CHECK(fl_erase4k_ram(0x97000u, 0) == FL_ERR_BUFFER);
-    CHECK(fl_erase4k_begin_ram(0x97001u, SAVED, ISSUED) == FL_ERR_RANGE);
+    CHECK(fl_erase4k_ram(W, 0) == FL_ERR_BUFFER);
+    CHECK(fl_erase4k_begin_ram(W + 1u, SAVED, ISSUED) == FL_ERR_RANGE);
     CHECK(fl_erase4k_begin_ram(0x4000u, SAVED, ISSUED) == FL_ERR_RANGE);   /* outside the write regions */
     CHECK(fl_erase4k_begin_ram(0xFFFFF000u, SAVED, ISSUED) == FL_ERR_RANGE);
-    CHECK(fl_prog_ram(0x970F0u, RAM(0x1C20000u), 17u, TOOK) == FL_ERR_RANGE);
-    CHECK(fl_prog_ram(0x97000u, RAM(0x1C20000u), 0u, TOOK) == FL_ERR_RANGE);
-    CHECK(fl_prog_ram(0x97000u, RAM(0x1C20000u), 257u, TOOK) == FL_ERR_RANGE);
-    CHECK(fl_prog_ram(0x97000u, RAM(0x2000000u), 16u, TOOK) == FL_ERR_BUFFER);
-    CHECK(fl_prog_ram(0x97000u, RAM(0x1C20000u), 16u, 0) == FL_ERR_BUFFER);
+    CHECK(fl_prog_ram(W + 0xF0u, RAM(0x1C20000u), 17u, TOOK) == FL_ERR_RANGE);
+    CHECK(fl_prog_ram(W, RAM(0x1C20000u), 0u, TOOK) == FL_ERR_RANGE);
+    CHECK(fl_prog_ram(W, RAM(0x1C20000u), 257u, TOOK) == FL_ERR_RANGE);
+    CHECK(fl_prog_ram(W, RAM(0x2000000u), 16u, TOOK) == FL_ERR_BUFFER);
+    CHECK(fl_prog_ram(W, RAM(0x1C20000u), 16u, 0) == FL_ERR_BUFFER);
     CHECK(fl_read_ram(0xFFFFFu, RAM(0x1C20000u), 2u) == FL_ERR_RANGE);
     CHECK(fl_read_ram(UINT32_MAX, RAM(0x1C20000u), 2u) == FL_ERR_RANGE);
     CHECK(fl_read_ram(0, RAM(0x1C7FFFFu), 2u) == FL_ERR_BUFFER);
     CHECK(fl_uid_ram(RAM(0x1C7FFFFu)) == FL_ERR_BUFFER);
     CHECK(memcmp(before, regs, sizeof before) == 0 && flushes == 0);
+#ifdef FL_PROTECTED
+    /* a board map's protected ranges (the SMK-37's boot head, BTIF, USRTRIM, USR, key_mac) and its app area: no erase,
+     * no program, before the bus is touched */
+    for (i = 0; i < FM1_FLASH_SIZE; i += 0x1000u)
+        if (FL_PROTECTED(i, 0x1000u) || i < FL_APP_HI) {
+            CHECK(fl_erase4k_ram(i, TOOK) == FL_ERR_RANGE);
+            CHECK(fl_erase4k_begin_ram(i, SAVED, ISSUED) == FL_ERR_RANGE);
+            CHECK(fl_prog_ram(i + 0xF00u, RAM(0x1C20000u), 16u, TOOK) == FL_ERR_RANGE);
+        }
+    CHECK(memcmp(before, regs, sizeof before) == 0 && flushes == 0);
+#endif
     for (i = 0; i < 2; i++) {
         uint32_t state = i ? 0x5B5u : 0x4B5u;
         reset(); cfg = state;

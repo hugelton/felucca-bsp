@@ -122,7 +122,7 @@ static int ident_is(uint32_t k, const char *text)
 int main(void)
 {
     static const uint8_t one[1] = {1}, two[1] = {2}, onetwo[2] = {1, 2};
-    char cut[16];
+    char cut[24];                       /* (the SMK-37's "SMK-37 Elite_601", its loader's "ota-SMK-37 Elite_900") */
 #ifdef FELUCCA_LOADER
     snprintf(cut, sizeof cut, "%s", TEST_ID);
 #else

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
 /* Actual policy, IRQ/CPU1 gate and wrapper code with a simulated RAM driver.
- * Run in default, custom-region, loader-override and expanded-capacity modes;
+ * Run in default, custom-region, loader-override and expanded-capacity modes,
+ * and with a board's own map (5: the SMK-37's, boards/smk37/fm1_flash.h);
  * tests/run_flash_tests.sh also checks invalid configurations. */
 #include <stdint.h>
 #ifndef FM1_CPU1
@@ -18,6 +19,9 @@
 #define FM1_FLASH_WRITE_REGIONS(X) X(0x100000u, 0x400000u)
 #elif TEST_LAYOUT == 4
 #define FM1_FLASH_WRITE_REGIONS(X)
+#elif TEST_LAYOUT == 5
+#define FL_MAP_ONLY 1                                   /* the SMK-37's map and its regions, over this policy */
+#include "../boards/smk37/fm1_flash.h"
 #endif
 #include "fm1_flash_policy.h"
 
@@ -102,6 +106,28 @@ static void policy(void)
     CHECK(FL_WRITE_OK(0x100000u, 0x300000u));
     CHECK(!FL_WRITE_OK(0xFFFFFu, 1u));
     CHECK(!FL_PLAIN_OK(0x100000u, 1u)); /* capacity does not extend XIP */
+#elif TEST_LAYOUT == 5
+    {
+        /* every sector: writable exactly in the SMK's windows (the store, the settings, the autosave, the two more,
+         * the update's staging, the stock marker), never in a protected range nor the app area */
+        uint32_t s, ok = 1;
+        for (s = 0; s < FM1_FLASH_SIZE; s += 0x1000u) {
+            int win = (s >= FL_DATA_LO && s < FL_DATA_HI) || (s >= FL_GLOB_LO && s < FL_GLOB_HI) ||
+                      (s >= FL_AUTO_LO && s < FL_AUTO_HI) || (s >= FL_XDATA0_LO && s < FL_XDATA0_HI) ||
+                      (s >= FL_XDATA1_LO && s < FL_XDATA1_HI) || (s >= FL_OTA_LO && s < FL_OTA_HI) ||
+                      s == FL_STOCK_MARK;
+            if (FL_WRITE_OK(s, 0x1000u) != win || (win && (FL_PROTECTED(s, 0x1000u) || s < FL_APP_HI)))
+                ok = 0;
+        }
+        CHECK(ok);
+    }
+    CHECK(FL_WRITE_OK(FL_DATA_LO, FL_DATA_HI - FL_DATA_LO) && FL_WRITE_OK(FL_GLOB_LO, FL_GLOB_HI - FL_GLOB_LO));
+    CHECK(FL_WRITE_OK(FL_OTA_LO, FL_OTA_HI - FL_OTA_LO));
+    CHECK(!FL_WRITE_OK(FL_BTIF, 1u) && !FL_WRITE_OK(FL_USRTRIM, 0x1000u) && !FL_WRITE_OK(FL_PROT2_LO, 1u));
+    CHECK(!FL_WRITE_OK(0xFF000u, 1u) && !FL_WRITE_OK(0x4000u, 1u) && !FL_WRITE_OK(FL_APP_HI - 1u, 1u));
+    CHECK(!FL_WRITE_OK(FL_OTA_HI - 0x100u, 0x200u));    /* the staging's end touches BTIF: not one byte of it */
+    CHECK(!FL_WRITE_OK(0x97000u, 0x1000u));               /* the FM-1's store: the SMK's app area */
+    CHECK(FM1_FLASH_PLAIN_LO == FL_APP_HI && FL_PLAIN_OK(FL_USRTRIM, 0x1000u) && !FL_PLAIN_OK(FL_APP_HI - 1u, 1u));
 #else
     CHECK(!FL_WRITE_OK(0x98000u, 1u));
     CHECK(!FL_WRITE_OK(FL_OTA_LO, 1u));
@@ -123,6 +149,16 @@ static void spans(void)
 #elif TEST_LAYOUT == 1
     reset();
     CHECK(fl_write(0x98F00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* a gap: no page */
+#elif TEST_LAYOUT == 5
+    reset();
+    CHECK(fl_write(0xA2F00u, RAM(0x1C10000u), 0x200u) == 0 && calls == 2);    /* AUTO -> XDATA1 at 0xA3000 */
+    reset();
+    CHECK(fl_write(0xE9F00u, RAM(0x1C10000u), 0x200u) == 0 && calls == 2);    /* the store -> the stock marker */
+    reset();
+    CHECK(fl_write(0xBFF00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* the staging -> BTIF */
+    CHECK(fl_write(0xC1F00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* USRTRIM -> the store */
+    CHECK(fl_write(0x9CF00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* the app area -> XDATA0 */
+    CHECK(fl_write(0xEDF00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* past the settings */
 #endif
 }
 
@@ -171,6 +207,8 @@ static void wrappers(void)
     off = 0x4000u + 0xF0u; limit = 0x97000u;
 #elif TEST_LAYOUT == 3
     off = 0x1000F0u; limit = FM1_FLASH_SIZE;
+#elif TEST_LAYOUT == 5
+    off = FL_DATA_LO + 0xF0u; limit = FL_GLOB_HI;   /* the SMK's store, up to the settings' end */
 #else
     reset();
     CHECK(fl_write(0x98000u, RAM(0x1C10000u), 1u) == FL_ERR_RANGE);

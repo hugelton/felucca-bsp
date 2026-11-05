@@ -16,23 +16,45 @@
  *   in the finish (after ldr_record_clear): erase 0xE4000; program zeros (<= 80 B) over an update record that was
  *   there at a 4 KiB boundary - 256 in (FL_APP_END, 0xFC000] outside Felucca's store; or erase that record's sector.
  * After every session that did not finish, and at every power cut: the boot area, the staged loader, the record and
- * the globals are as they were, or (a cut inside the finish) the record is gone and the app area is the package's. */
+ * the globals are as they were, or (a cut inside the finish) the record is gone and the app area is the package's.
+ *
+ * With -DLDR_SMK37 it runs the SMK-37's loader (loader/ldr_smk37.h, the windows loader.c builds it with, from
+ * boards/smk37/fm1_flash.h): the app area [0x4000, 0x9D000), the staging [0xBB000, 0xC0000) (its record 0xBFF00),
+ * records cleared only in the stock VM up to BTIF, and nothing at or above BTIF (0xC0000: BTIF, USRTRIM, the store,
+ * the settings, USR, key_mac) ever written, in place of the FM-1's globals; a package not laid out for the SMK (an
+ * FM-1's, another size, another app slot, its VM elsewhere) refused before any erase, in both installs. */
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define FELUCCA_ID "ota-FM-1_900"
 #define FELUCCA_OTA_DRYRUN 0
 #define LDR_FAST_CHUNK 4096u
 #define OTA_FRAME_MAX 4200u
 
 #define NOR_SIZE 0x100000u
+#ifdef LDR_SMK37
+#define LDR_MODEL "SMK-37 Elite"
+#include "../loader/ldr_smk37.h"                         /* the SMK's loader, as loader.c builds it */
+#define FL_MAP_ONLY 1
+#include "../boards/smk37/fm1_flash.h"
+_Static_assert(LDR_SMK37_WINDOWS_OK, "the SMK's loader windows");
+#define BOARD "SMK-37"
+#define STG_LO FL_OTA_LO                                 /* ota.c OTA_AREA: 0xBB000 */
+#define STG_HI FL_OTA_HI
+#define GLOB_LO FL_PROT1_LO                              /* BTIF (0xC0000) and everything above it: never written */
+#define GLOB_WHAT "BTIF / USRTRIM / STORE / USR / KEY_MAC"
+#else
+#define FELUCCA_ID "ota-FM-1_900"
+#define BOARD "FM-1"
 #define STG_LO 0xE0000u                                  /* ota.c OTA_AREA */
-#define STG_REC_SEC 0xE4000u                             /* the staging's last sector: the record at 0xE4F00 */
 #define STG_HI 0xE5000u
 #define GLOB_LO 0xFC000u
+#define GLOB_WHAT "GLOBALS / KEY_MAC"
+#endif
+#define STG_REC_SEC (STG_HI - 0x1000u)                   /* the staging's last sector: the record at 0xE4F00 */
+#define STG_REC (STG_REC_SEC + 0xF00u)
 #define CHIP_KEY 0x980Fu
 
 enum { OP_ERASE, OP_PROG, OP_ERASE_BEGIN };
@@ -225,7 +247,7 @@ static void tb_op(int kind, uint32_t off, const uint8_t *p, uint32_t n)
     if (kind == OP_PROG && ((off & 0xFFu) + n) > 256u) { viol("program across a page", kind, off, n); return; }
     if (off < 0x4000u) { viol("BOOT AREA", kind, off, n); return; }
     if (end > STG_LO && off < STG_REC_SEC) { viol("STAGED LOADER", kind, off, n); return; }
-    if (end > GLOB_LO) { viol("GLOBALS / KEY_MAC", kind, off, n); return; }
+    if (end > GLOB_LO) { viol(GLOB_WHAT, kind, off, n); return; }
     if (!in_finish) {
         if (end > STG_REC_SEC && off < STG_HI) { viol("UPDATE RECORD before the finish", kind, off, n); return; }
         if (off >= 0x4000u && end <= APP_HI)
@@ -277,10 +299,19 @@ static void fill(uint32_t lo, uint32_t hi, uint32_t seed)
     for (; lo < hi; lo++) nor[lo] = (uint8_t)rnd();
 }
 
+#ifdef LDR_SMK37
+#define REC_XDATA0 0x9EF00u                              /* in the stock VM above the app area (the SMK's XDATA0) */
+#define REC_STORE 0xD5F00u                               /* in the store: user data, kept */
+#define REC_STOCK 0xB5F00u                               /* in the stock VM (the SMK's XDATA1) */
+#define REC_GLOB 0xC1F00u                                /* in USRTRIM, the factory calibration: never looked at */
+#define XDATA0_REC 1
+#else
 #define REC_XDATA0 0x95F00u                              /* only below LDR_DATA_LO (the 0x93000 slot) */
 #define REC_STORE 0xD5F00u                               /* in Felucca's store: user data, kept */
 #define REC_STOCK 0xE8F00u                               /* the stock firmware's */
 #define REC_GLOB 0xFDF00u                                /* in the globals: never looked at */
+#define XDATA0_REC (APP_HI < 0x97000u)
+#endif
 
 /* the device: a head with the chip key, an app whose head says old_len, data above, the staged loader and its
  * record, the stock record, globals and key_mac */
@@ -302,20 +333,20 @@ static void dev_init(uint32_t old_len, uint32_t old_end)
     fill(0x4000, old_end, 11);                           /* the installed app */
     app_head(nor + 0x4000, old_len, CHIP_KEY);
     fill(old_end, STG_LO, 12);                           /* data */
-    if (APP_HI < 0x97000u) put_record(nor + REC_XDATA0);
-    put_record(nor + REC_STORE);
     fill(STG_LO, STG_HI, 13);                            /* the staged loader ... */
-    memset(nor + 0xE4E00, 0xFF, 0x200);
-    put_record(nor + 0xE4F00);                           /* ... and its record */
+    memset(nor + STG_REC - 0x100u, 0xFF, 0x200);
+    put_record(nor + STG_REC);                           /* ... and its record */
     fill(STG_HI, GLOB_LO, 14);
+    fill(GLOB_LO, NOR_SIZE, 15);                         /* globals, key_mac (the SMK: BTIF and all above it) */
+    if (XDATA0_REC) put_record(nor + REC_XDATA0);        /* (the records last: on the SMK the store is above GLOB_LO) */
+    put_record(nor + REC_STORE);
     put_record(nor + REC_STOCK);
-    fill(GLOB_LO, NOR_SIZE, 15);                         /* globals, key_mac */
     put_record(nor + REC_GLOB);
     memcpy(before, nor, sizeof nor);
 }
 
 typedef struct {
-    uint32_t fl_off, fl_size, new_len, key;
+    uint32_t fl_off, fl_size, new_len, key, slot, vm;    /* (slot, vm: the SMK's layout check, ldr_core.c 2a) */
     int head_zero, above_zero, flip_fl, flip_t16, flip_t32, bad_ufw, nent;
 } pkg_t;
 #define FLIP_AT (0x7000u + 5u)                           /* in sector 7: one the package changes (7 % 3 == 1) */
@@ -329,8 +360,31 @@ static pkg_t pkg_default(void)
     p.new_len = APP_HI - 0x4000u - 0x100u;              /* its end: this slot's */
     p.key = CHIP_KEY;
     p.nent = 2;
+#if LDR_LAYOUT
+    p.slot = LDR_APP_SLOT;
+    p.vm = LDR_VM_OFF;
+#endif
     return p;
 }
+
+#if LDR_LAYOUT
+/* the app area's table after its head, as a board's package has it (ldr_core.c 2a): app.bin's entry at 0x20 (its size
+ * at +8: the app slot), the VM descriptor at 0x40 ("VM", its offset at +4; none when vm is 0); SFC with key */
+static void app_layout(uint8_t *at, uint32_t slot, uint32_t vm, uint32_t key)
+{
+    uint8_t t[0xE0];
+    uint32_t i;
+    for (i = 0; i < sizeof t; i++) t[i] = (uint8_t)(0x60 + i);
+    memcpy(t + 16, "app.bin", 8);
+    ota_wr32(t + 8, slot);
+    if (vm) {
+        ota_wr32(t + 0x20 + 4, vm);
+        memcpy(t + 0x20 + 16, "VM", 3);
+    }
+    ldr_sfc(t, sizeof t, 0x20, key);
+    memcpy(at + 0x20, t, sizeof t);
+}
+#endif
 
 static void pkg_build(const pkg_t *p)
 {
@@ -344,6 +398,9 @@ static void pkg_build(const pkg_t *p)
         for (i = 0; i < 0x1000u; i++)
             h_fl[k + i] = ((k >> 12) % 3u == 1u) ? (uint8_t)rnd() : before[k + i];
     if (sz > 0x4000u) app_head(h_fl + 0x4000, p->new_len, p->key);
+#if LDR_LAYOUT
+    if (sz > 0x4100u) app_layout(h_fl + 0x4000, p->slot, p->vm, p->key);
+#endif
     if (sz > APP_HI) memset(h_fl + APP_HI, p->above_zero ? 0x00 : 0x5A, sz - APP_HI);
     h_fl_off = p->fl_off;
     h_fl_size = sz;
@@ -405,7 +462,7 @@ static void check_recovery(void)
     if (!in_finish)
         CHECK(same(STG_REC_SEC, STG_HI), "the record's sector changed before the finish");
     else
-        CHECK(rec_valid(0xE4F00) || app_is_pkg(), "record gone but the app not whole");
+        CHECK(rec_valid(STG_REC) || app_is_pkg(), "record gone but the app not whole");
 }
 
 /* after a whole install: the app is the package's, [clo, chi) erased, the records gone where they were killed, the
@@ -418,7 +475,7 @@ static void check_final(uint32_t clo, uint32_t chi)
     CHECK(same(0, 0x4000), "boot area changed");
     CHECK(same(STG_LO, STG_REC_SEC), "staged loader changed");
     CHECK(same(GLOB_LO, NOR_SIZE), "globals / key_mac changed");
-    CHECK(!rec_valid(0xE4F00) && sector_erased(STG_REC_SEC), "the loader's record sector not erased");
+    CHECK(!rec_valid(STG_REC) && sector_erased(STG_REC_SEC), "the loader's record sector not erased");
     CHECK(rec_valid(REC_GLOB), "a record lookalike in the globals was touched");
     for (i = clo; i < chi; i++)
         if (nor[i] != 0xFF) { CHECK(0, "slot clear [%#x, %#x) not erased at %#x", clo, chi, i); break; }
@@ -430,7 +487,7 @@ static void check_final(uint32_t clo, uint32_t chi)
                     ((a & ~0xFFFu) == (killed[i] & ~0xFFFu) && sector_erased(a & ~0xFFFu));
         if (nor[a] != before[a] && !kill) { CHECK(0, "data changed at %#x", a); break; }
     }
-    if (APP_HI < 0x97000u && !(REC_XDATA0 >= clo && REC_XDATA0 < chi) && !lenient)
+    if (XDATA0_REC && !(REC_XDATA0 >= clo && REC_XDATA0 < chi) && !lenient)
         CHECK(!rec_valid(REC_XDATA0), "XDATA0 record not killed");
     if (!(REC_STORE >= clo && REC_STORE < chi))
         CHECK(rec_valid(REC_STORE), "a record lookalike in Felucca's store was touched");
@@ -508,19 +565,19 @@ static void cut_sweep(const char *name, const pkg_t *p, uint32_t old_len, uint32
             cut_at = k;
         if (!setjmp(cut_jmp)) {
             rc = run(fast);
-            if (rc == 0 && !rec_valid(0xE4F00)) { check_final(clo, chi); points++; continue; }
+            if (rc == 0 && !rec_valid(STG_REC)) { check_final(clo, chi); points++; continue; }
             if (rc == 0)
                 left++;                                  /* the finish's erase of 0xE4000 failed: the record stays
                                                           * (the new app's ota_boot_cleanup erases it) */
         }
         check_recovery();                                /* cut, or the session failed */
         cut_at = fail_at = -1;
-        resumed += rec_valid(0xE4F00);
-        lenient = !rec_valid(0xE4F00);                   /* a cut in the finish after the loader's record went:
+        resumed += rec_valid(STG_REC);
+        lenient = !rec_valid(STG_REC);                   /* a cut in the finish after the loader's record went:
                                                           * a foreign record below it may still be there */
-        for (tries = 0; tries < 2 && rec_valid(0xE4F00); tries++)
+        for (tries = 0; tries < 2 && rec_valid(STG_REC); tries++)
             rc = run(fast);                              /* power-on: the record brings the loader back */
-        CHECK(!rec_valid(0xE4F00), "after resume the record is still there (op %ld)", k);
+        CHECK(!rec_valid(STG_REC), "after resume the record is still there (op %ld)", k);
         check_final(clo, chi);
         lenient = 0;
         points++;
@@ -593,7 +650,8 @@ int main(void)
     pkg_t p = pkg_default(), q;
     const uint32_t same_len = APP_HI - 0x4000u - 0x100u;
     int fast;
-    printf("ldr_bounds_test: FL_APP_END %#x, LDR_DATA_LO %#x, slot switch %d", APP_HI, LDR_DATA_LO, SWITCH);
+    printf("ldr_bounds_test: %s, FL_APP_END %#x, LDR_DATA_LO %#x, staging %#x, slot switch %d", BOARD, APP_HI,
+           LDR_DATA_LO, STG_LO, SWITCH);
 #ifdef LDR_CLEAR_END
     printf(", LDR_CLEAR_END %#x", (unsigned)LDR_CLEAR_END);
 #endif
@@ -657,10 +715,36 @@ int main(void)
         either(nm, &q, fast);
         q = pkg_default(); q.fl_size = NOR_SIZE; q.head_zero = 1; q.above_zero = 1;
         snprintf(nm, sizeof nm, "%s: valid 1 MiB flash.bin, zero head + zeros above", m);
+#if LDR_LAYOUT
+        refused(nm, &q, fast, H_OK, -15);                /* a board's: only its own app area's size */
+#else
         install(nm, &q, same_len, APP_HI, fast, 0, 0);
+#endif
         q = pkg_default(); q.fl_size = APP_HI + 0x123u;
         snprintf(nm, sizeof nm, "%s: flash.bin not whole sectors", m);
+#if LDR_LAYOUT
+        refused(nm, &q, fast, H_OK, -15);
+#else
         install(nm, &q, same_len, APP_HI, fast, 0, 0);
+#endif
+#if LDR_LAYOUT
+        /* another board's package, or one not laid out for this board: nothing erased */
+        q = pkg_default(); q.fl_size = 0x93000u; q.new_len = 0x93000u - 0x4000u - 0x100u;
+        snprintf(nm, sizeof nm, "%s: an FM-1 package (flash.bin 0x93000)", m);
+        refused(nm, &q, fast, H_OK, -3);
+        q = pkg_default(); q.fl_size = APP_HI + 0x1000u;
+        snprintf(nm, sizeof nm, "%s: flash.bin a sector longer than the app area", m);
+        refused(nm, &q, fast, H_OK, -15);
+        q = pkg_default(); q.slot = 0x8DFBCu;
+        snprintf(nm, sizeof nm, "%s: app.bin in the FM-1's slot", m);
+        refused(nm, &q, fast, H_OK, -16);
+        q = pkg_default(); q.vm = 0x93000u;
+        snprintf(nm, sizeof nm, "%s: its VM where the FM-1's would be", m);
+        refused(nm, &q, fast, H_OK, -17);
+        q = pkg_default(); q.vm = 0;
+        snprintf(nm, sizeof nm, "%s: no VM descriptor", m);
+        refused(nm, &q, fast, H_OK, -17);
+#endif
         /* hostile hosts */
         snprintf(nm, sizeof nm, "%s: host answers another address", m);
         refused(nm, &p, fast, H_WRONG_ADDR, -1);

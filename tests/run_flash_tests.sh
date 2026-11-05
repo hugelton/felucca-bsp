@@ -8,7 +8,7 @@ trap 'rm -rf "$OUT"' EXIT HUP INT TERM
 CC=${CC:-cc}
 # FLASH_TEST_SANITIZE= (empty) builds without the sanitizers (on a Mac where ASan hangs at start-up).
 SANITIZE=${FLASH_TEST_SANITIZE--fsanitize=address,undefined}
-for layout in 0 1 2 3 4 0-nocpu1; do
+for layout in 0 1 2 3 4 5 0-nocpu1; do
     cpu1=1
     case "$layout" in *-nocpu1) layout=${layout%-nocpu1}; cpu1=0 ;; esac
     "$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -O2 \
@@ -22,6 +22,10 @@ for plain_hi in 0x100000u 0xA0000u; do
         "$ROOT/tests/flash_driver_test.c" -o "$OUT/driver"
     "$OUT/driver"
 done
+# the SMK-37's map over the same driver (boards/smk37/fm1_flash.h shadows the chip's: its regions, its plain window)
+"$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -Wno-int-to-pointer-cast -O2 \
+    $SANITIZE -I"$ROOT/boards/smk37" -I"$ROOT/chip" "$ROOT/tests/flash_driver_test.c" -o "$OUT/driver-smk37"
+"$OUT/driver-smk37"
 for config in '-DFM1_FLASH_SIZE=0x2000000u' '-DFM1_FLASH_SIZE=0x80000u' \
     '-DFM1_FLASH_XIP_SIZE=0x200000u' '-DFM1_FLASH_PLAIN_LO=0u' \
     '-DFM1_FLASH_PLAIN_HI=0x92000u'; do
