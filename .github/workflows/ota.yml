@@ -1,0 +1,17 @@
+name: Update handshake test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  ota:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The identity to M-UPGRADE's handshake and to the one with body 01 (chip/ota.c)
+        env:
+          CC: clang
+        run: tests/run_ota_test.sh
+      - name: The installer against a simulated FM-1
+        run: python3 tests/install_test.py
