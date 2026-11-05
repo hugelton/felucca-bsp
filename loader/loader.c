@@ -15,8 +15,6 @@
 #define FELUCCA_ID "ota-FM-1_900"
 #define LDR_FAST_CHUNK 4096u           /* the fast install (ldr_core.c): one sector per read */
 #define OTA_FRAME_MAX 4200u            /* a decoded 4 KiB response (4111 B) */
-#define FELUCCA_SX_IN 4744u            /* usb.c's SysEx queue: one such response as it comes in, 7-bit packed (4699 B),
-                                        * and its length (2 B) */
 #define RING_PUBLISH() __asm__ volatile("" ::: "memory")
 #include "fm1_time.h"
 #include "fm1_sys.h"
@@ -26,6 +24,10 @@
 #include "fm1_flash.h"
 #include "../chip/libc.c"
 #include "../chip/usb.c"
+/* usb.c's SysEx queue (FELUCCA_SX_IN, the loader's default there) holds the fast install's reply whole: a 4 KiB read
+ * and its 15 bytes of frame, 7-bit packed, and the queue's length field */
+_Static_assert(((LDR_FAST_CHUNK + 15u) * 8u + 6u) / 7u + 2u <= FELUCCA_SX_IN, "FELUCCA_SX_IN: a 4 KiB reply whole");
+_Static_assert(LDR_FAST_CHUNK + 15u <= OTA_FRAME_MAX, "OTA_FRAME_MAX: a 4 KiB reply decoded");
 #include "ldr_screen.c"
 
 static uint32_t ldr_ms(void)   /* monotonic ms; survives the TIMER4 wrap (178.9 s) */
@@ -93,12 +95,14 @@ static void ldr_record_clear(void)
 {
     fm1_updata_parm_clear();                        /* CRC 0: the SPL ignores it on a warm reset */
 }
-/* the erase while the sector comes in (ldr_core.c, the fast install): nothing touches the flash in between */
+/* the erase while the sector comes in (ldr_core.c, the fast install): nothing touches the flash in between. Begin goes
+ * through fm1_flash.h's checks (regions, flash gate); end never gives the XIP back while the part is busy */
 static fl_saved_t ldr_er_saved;
+static uint32_t ldr_er_issued;
 static uint8_t ldr_er_on;
 static int ldr_erase_begin(uint32_t off)
 {
-    int rc = fl_erase4k_begin_ram(off, &ldr_er_saved);
+    int rc = fl_erase4k_begin_ram(off, &ldr_er_saved, &ldr_er_issued);
     ldr_er_on = rc == 0;
     return rc;
 }
@@ -108,7 +112,7 @@ static int ldr_erase_end(void)
     if (!ldr_er_on)
         return -1;
     ldr_er_on = 0;
-    return fl_erase4k_end_ram(&ldr_er_saved, &took);
+    return fl_erase4k_end_ram(&ldr_er_saved, ldr_er_issued, &took);
 }
 static void ldr_progress(uint32_t done, uint32_t total) { ldr_screen_progress(done, total); ldr_poll(); }
 #include "ldr_core.c"

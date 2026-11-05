@@ -61,6 +61,28 @@ static result_t operation(uint32_t start, uint32_t busy_us, int never, uint32_t 
     return r;
 }
 
+/* the update loader's split erase (fm1_flash.h fl_erase4k_begin_ram / fl_erase4k_end_ram): the command, `gap_us` of the
+ * loader's own work (a sector from the host, XIP off), then fl_wait_split and XIP back on */
+static result_t split(uint32_t start, uint32_t busy_us, int never, uint32_t gap_us)
+{
+    result_t r = {0, 0, 0, 0xFFFFFFFFu, 0};
+    uint32_t issued;
+    now = start;
+    stuck = never;
+    issued = T4_CNT;
+    now += 24u * 20u + 24u * gap_us;
+    ready_at = issued + 24u * busy_us;
+    if (setjmp(reset_point)) {
+        r.reset = 1;
+        r.elapsed_us = (now - issued) / 24u;
+        return r;
+    }
+    r.rc = fl_wait_split(issued, 500000u, 2000000u, &r.took);
+    r.xip_on_while_busy = part_busy();
+    r.elapsed_us = (now - issued) / 24u;
+    return r;
+}
+
 static void bounds(uint32_t normal, uint32_t extended, uint32_t start)
 {
     result_t r;
@@ -86,6 +108,36 @@ int main(void)
     bounds(10000u, 50000u, 1000u);              /* page program */
     bounds(500000u, 2000000u, 0xFFFFFFFFu - 24u * 300000u);   /* TIMER4 wraps during the wait */
     bounds(10000u, 50000u, 0xFFFFFFFFu - 24u * 5000u);
+    {   /* the split erase: done during the gap (however long): 0; still busy after it: waited out as fl_wait_issued */
+        result_t r;
+        r = split(1000u, 60000u, 0, 100000u);                     /* erased while the sector came in */
+        CHECK(!r.reset && r.rc == 0 && !r.xip_on_while_busy);
+        r = split(1000u, 60000u, 0, 5000000u);                    /* a slow host (5 s): still 0, no reset */
+        CHECK(!r.reset && r.rc == 0 && !r.xip_on_while_busy);
+        r = split(1000u, 300000u, 0, 50000u);                     /* the sector came in first: the erase waited out */
+        CHECK(!r.reset && r.rc == 0 && !r.xip_on_while_busy && r.took >= 300000u);
+        r = split(1000u, 700000u, 0, 50000u);                     /* a slow part: late, idle before XIP */
+        CHECK(!r.reset && r.rc == FL_ERR_LATE_READY && !r.xip_on_while_busy);
+        r = split(1000u, 0, 1, 50000u);                           /* stuck: reset 2 s after the command */
+        CHECK(r.reset && r.elapsed_us >= 2000000u && r.elapsed_us <= 2000002u);
+        r = split(1000u, 0, 1, 3000000u);                         /* stuck, seen after 3 s: reset at once */
+        CHECK(r.reset && r.elapsed_us <= 3000022u);
+        r = split(0xFFFFFFFFu - 24u * 1000u, 300000u, 0, 50000u); /* TIMER4 wraps */
+        CHECK(!r.reset && r.rc == 0 && !r.xip_on_while_busy);
+        for (i = 0; i < 20000u; i++) {
+            uint32_t busy, gap;
+            seed = seed * 1664525u + 1013904223u; busy = seed % 2500000u;
+            seed = seed * 1664525u + 1013904223u; gap = seed % 3000000u;
+            seed = seed * 1664525u + 1013904223u; poll_ticks = 24u + seed % (24u * 500u);
+            r = split(seed, busy, (seed >> 20) % 50u == 0u, gap);
+            CHECK(!r.xip_on_while_busy);
+            if (r.reset)
+                CHECK(stuck || busy >= 2000000u - 500u);
+            else
+                CHECK(r.rc == 0 || (r.rc == FL_ERR_LATE_READY && r.took > 500000u && busy > gap));
+            if (fails) break;
+        }
+    }
     /* any busy time and poll cost: never XIP while busy; reset only with the part busy at or past the extended
      * bound; 0 exactly when the part was seen idle within the normal bound */
     for (i = 0; i < 20000u; i++) {

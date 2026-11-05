@@ -276,7 +276,12 @@ static struct {
  * (the host retries). The ISR writes and counts sx_made; the main loop reads
  * and counts sx_taken (sx_r, sx_ep its own). */
 #ifndef FELUCCA_SX_IN
+#if FELUCCA_LOADER
+#define FELUCCA_SX_IN 4744u                       /* the update loader's fast install: a 4 KiB read's reply (4111 B,
+                                                   * 4699 as it comes in, 7-bit packed) whole (loader.c checks it) */
+#else
 #define FELUCCA_SX_IN 648u                        /* an M-UPGRADE frame (640) whole; shorter ones several at once */
+#endif
 #endif
 static uint8_t sx_frame[FELUCCA_SX_IN];
 static uint32_t sx_pos, sx_at, sx_top, sx_w;      /* the ISR's: the frame's bytes so far, where they go, where it

@@ -7,7 +7,7 @@
  * inside ota_frame_get and ota_frame_done: at their barriers (RING_PUBLISH) and, built from the copy of usb.c
  * run_sysex_queue_test.sh makes (TEST_USB_C, TEST_PREEMPT() after each of their statements), between any two of
  * their statements. Checked, for the buffer
- * FELUCCA_SX_IN this is built with (run_sysex_queue_test.sh: 300 to 2000 bytes, and the update loader's build):
+ * FELUCCA_SX_IN this is built with (run_sysex_queue_test.sh: 300 to 2000 bytes, and the update loader's build, 4744):
  *   - every frame up to FELUCCA_SX_IN - 54 bytes arrives whole and in order (TEST_LONG 0: all of them); a longer one
  *     may be dropped, never anything else, one longer than FELUCCA_SX_IN - 2 always is, and so may the frames that
  *     begin in the USB packet a longer one ends in (TEST_LONG 3: 3% of the frames longer; the buffer has no room
@@ -104,7 +104,8 @@ static uint8_t frame_byte(uint32_t k, uint32_t i)       /* frame k's i-th byte (
 static uint32_t *flen;                                  /* the frames sent, by number */
 static uint32_t sent;                                   /* the frames started on the wire */
 static uint8_t *after_long;                             /* the frame started in the packet a longer one ended in */
-static uint32_t ev[1100], ev_n, ev_at;                  /* the frame's event packets; the next to send */
+static uint32_t ev[FELUCCA_SX_IN / 2u + 200u], ev_n, ev_at;   /* the frame's event packets (3 bytes and some
+                                                         * clocks each); the next to send */
 static uint8_t pkt[64];
 static uint32_t pkt_n;                                  /* the packet the host sends (again after a NAK) */
 static uint8_t clocks;                                  /* F8s between the events (not in the update loader) */
@@ -192,7 +193,7 @@ static void preempt(void)
 /* ------------------------------------------------------- the main loop --- */
 static uint32_t expect;                                 /* the next frame to arrive, by number */
 static uint32_t got, dropped, dropped_after;
-static uint8_t held[2048];
+static uint8_t held[FELUCCA_SX_IN];
 
 static int take(void)                                   /* one frame from the queue, checked; 0: none */
 {

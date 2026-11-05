@@ -228,24 +228,28 @@ static RAMFN int fl_erase4k_ram(uint32_t off, uint32_t *took_us)
 
 /* the update loader's erase while it receives (loader/ldr_core.c, the fast install): begin sends 20h and leaves the XIP
  * off, as fl_erase4k_ram does while it waits; the loader runs from RAM and only polls USB until end, which waits the
- * erase out and gives the XIP back. Between the two nothing may touch the flash */
-static RAMFN int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s)
+ * erase out (fl_wait_split: never back to XIP while the part is busy; a part still busy 2 s after the command resets
+ * as fl_erase4k_ram's) and gives the XIP back. Between the two nothing may touch the flash. Begin takes the same checks
+ * as fl_erase4k_ram (the write regions, the flash gate: CPU0, interrupts off, CPU1 idle); *s and *issued (the caller's
+ * RAM, kept for end) get the saved SFC / SPI state and the command's time */
+static RAMFN int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s, uint32_t *issued)
 {
-    if (!FL_RANGE_OK(off, 0x1000u) || (off & 0xFFFu))
-        return -1;
-    if (fl_enter(s)) return -2;
+    if (!FL_WRITE_OK(off, 0x1000u) || (off & 0xFFFu))
+        return FL_ERR_RANGE;
+    { int rc = fl_enter(s); if (rc) return rc; }
     fl_wren();
     if (!(fl_rdsr(0x05) & 2u)) {                  /* WEL did not set */
         fl_exit(s);
-        return -3;
+        return FL_ERR_WEL;
     }
+    *issued = T4_CNT;
     fl_cs(0); fl_tx(0x20); fl_addr(off); fl_cs(1);
     fl_inval(off, 4096u);
     return 0;
 }
-static RAMFN int fl_erase4k_end_ram(const fl_saved_t *s, uint32_t *took_us)
+static RAMFN int fl_erase4k_end_ram(const fl_saved_t *s, uint32_t issued, uint32_t *took_us)
 {
-    int rc = fl_wait_ready(500000u, took_us);     /* generic NOR max 400 ms */
+    int rc = fl_wait_split(issued, 500000u, 2000000u, took_us);   /* generic NOR max 400 ms */
     fl_exit(s);
     return rc;
 }

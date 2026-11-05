@@ -30,3 +30,12 @@ RAMINL int fl_wait_issued(uint32_t issued, uint32_t normal, uint32_t extended, u
         if (dt >= extended) fl_reset_busy();
     }
 }
+/* The fast install's erase while a sector comes in (fm1_flash.h fl_erase4k_end_ram): the caller did its own work (a
+ * 4 KiB read from the host, from RAM, XIP off) between the command and this wait. A part seen idle at the first status
+ * read is done: 0, however long that work took. One still busy is waited out as fl_wait_issued, counted from the
+ * command: late past `normal`, a reset at `extended`. */
+RAMINL int fl_wait_split(uint32_t issued, uint32_t normal, uint32_t extended, uint32_t *took_us)
+{
+    if (!(fl_rdsr(0x05) & 1u)) { *took_us = (T4_CNT - issued) / 24u; return 0; }
+    return fl_wait_issued(issued, normal, extended, took_us);
+}

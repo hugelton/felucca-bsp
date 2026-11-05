@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MPL-2.0
 # Copyright (C) 2026 Charles Vestal
 # chip/usb.c's queue of received SysEx frames on the host (tests/sysex_queue_test.c): buffers from 300 to 2000
-# bytes (FELUCCA_SX_IN), with frames longer than the guaranteed size and without, and the update loader's build.
+# bytes (FELUCCA_SX_IN), with frames longer than the guaranteed size and without, and the update loader's build (4744:
+# the fast install's 4 KiB replies).
 # The test is built from a copy of usb.c with TEST_PREEMPT() after each statement of ota_frame_get and
 # ota_frame_done, where the ISR may run (the main loop's side of the queue). SYSEX_TEST_SANITIZE= (empty) builds
 # without the sanitizers (on a Mac where ASan hangs at start-up).

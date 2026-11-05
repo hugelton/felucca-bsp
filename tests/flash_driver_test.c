@@ -45,6 +45,10 @@ static unsigned checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { printf("FAIL %d: %s\n", __LINE__, #c); fails++; } } while (0)
 #define RAM(p) ((uint8_t *)(uintptr_t)(p))
 #define TOOK ((uint32_t *)RAM(0x1C10000u))
+static fl_saved_t saved_state;                     /* the split erase's state: the caller's (the loader's statics) */
+static uint32_t issued_at;
+#define SAVED (&saved_state)
+#define ISSUED (&issued_at)
 
 static void reset(void)
 {
@@ -61,6 +65,7 @@ static void refused(int expected)
     uint8_t before_enc = enc;
     memcpy(before, regs, sizeof before);
     CHECK(fl_erase4k_ram(0x97000u, TOOK) == expected);
+    CHECK(fl_erase4k_begin_ram(0x97000u, SAVED, ISSUED) == expected);   /* the update loader's split erase */
     CHECK(fl_prog_ram(0x97000u, RAM(0x1C20000u), 16, TOOK) == expected);
     CHECK(fl_read_ram(0, RAM(0x1C20000u), 16) == expected);
     CHECK(fl_uid_ram(RAM(0x1C20000u)) == expected);
@@ -88,6 +93,9 @@ int main(void)
     CHECK(fl_erase4k_ram(0x97001u, TOOK) == FL_ERR_RANGE);
     CHECK(fl_erase4k_ram(0x4000u, TOOK) == FL_ERR_RANGE);
     CHECK(fl_erase4k_ram(0x97000u, 0) == FL_ERR_BUFFER);
+    CHECK(fl_erase4k_begin_ram(0x97001u, SAVED, ISSUED) == FL_ERR_RANGE);
+    CHECK(fl_erase4k_begin_ram(0x4000u, SAVED, ISSUED) == FL_ERR_RANGE);   /* outside the write regions */
+    CHECK(fl_erase4k_begin_ram(0xFFFFF000u, SAVED, ISSUED) == FL_ERR_RANGE);
     CHECK(fl_prog_ram(0x970F0u, RAM(0x1C20000u), 17u, TOOK) == FL_ERR_RANGE);
     CHECK(fl_prog_ram(0x97000u, RAM(0x1C20000u), 0u, TOOK) == FL_ERR_RANGE);
     CHECK(fl_prog_ram(0x97000u, RAM(0x1C20000u), 257u, TOOK) == FL_ERR_RANGE);
