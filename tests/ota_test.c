@@ -4,10 +4,13 @@
  * the identity cut to its name, '_' and three digits (M-UPGRADE 3.11 refuses more), the query with the body 01 the
  * whole identity, any other body nothing; the same during a session (ota_read answers a handshake between reads).
  * The update loader (-DFELUCCA_LOADER) answers the plain query with its whole identity and not the one with 01.
+ * Every answer carries the flash's JEDEC ID in bytes 24..26 (felucca-bsp#29: OTA_FLASH_ID, TEST_JEDEC here; 0 to
+ * leave OTA_FLASH_ID undefined, the bytes 0), with zeros between the text and them.
  * The scheme is PERF-1's (deamonSLINKY/PERF-1 775106b). Not the session: fm1-base's tests/ota_test.c serves it a
  * real package.
  *
  *   cc -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-function [-DTEST_ID='"FM-1_600"'] [-DFELUCCA_LOADER=1]
+ *      [-DTEST_JEDEC=0]
  *      tests/ota_test.c -o ota_test && ./ota_test */
 #include <stdint.h>
 #include <stdio.h>
@@ -21,6 +24,12 @@
 #endif
 #endif
 #define FELUCCA_ID TEST_ID
+#ifndef TEST_JEDEC
+#define TEST_JEDEC 0xB36014u            /* a UC25HQ80 (hugelton/Felucca#320) */
+#endif
+#if TEST_JEDEC
+#define OTA_FLASH_ID() (TEST_JEDEC)
+#endif
 #define FELUCCA_OTA_DRYRUN 1
 
 static uint8_t rx[64];                  /* one pending host frame (7-bit bytes) */
@@ -93,16 +102,21 @@ static void want(const char *what, int ok)
     fails += !ok;
 }
 
-/* the k-th reply an identity frame (34 bytes: 00 59 11, length 27, the text, zeros, checksum) holding text */
+/* the k-th reply an identity frame (34 bytes: 00 59 11, length 27, the text, zeros up to byte 24, the JEDEC ID in
+ * 24..26, checksum) holding text */
 static int ident_is(uint32_t k, const char *text)
 {
     const uint8_t *m = tx[k];
     uint32_t i, s = 0, n = (uint32_t)strlen(text);
-    if (k >= tx_n || tx_len[k] != 34u || m[0] != 0 || m[1] != 0x59 || m[2] != 0x11 || m[3] != 27u)
+    if (k >= tx_n || tx_len[k] != 34u || m[0] != 0 || m[1] != 0x59 || m[2] != 0x11 || m[3] != 27u || n >= 24u)
         return 0;
     for (i = 0; i < 27u; i++)
         s += m[6 + i];
-    return (uint8_t)~s == m[33] && !memcmp(m + 6, text, n) && !m[6 + n] && m[6 + 26] == 0;
+    for (i = n; i < 24u; i++)
+        if (m[6 + i])
+            return 0;
+    return (uint8_t)~s == m[33] && !memcmp(m + 6, text, n) && m[6 + 24] == (uint8_t)(TEST_JEDEC >> 16) &&
+           m[6 + 25] == (uint8_t)(TEST_JEDEC >> 8) && m[6 + 26] == (uint8_t)TEST_JEDEC;
 }
 
 int main(void)
@@ -114,7 +128,7 @@ int main(void)
 #else
     snprintf(cut, sizeof cut, "%.*s", (int)(strchr(TEST_ID, '_') - TEST_ID) + 4, TEST_ID);
 #endif
-    printf("identity %s, to the plain query %s\n", TEST_ID, cut);
+    printf("identity %s, to the plain query %s, flash %06X\n", TEST_ID, cut, (unsigned)TEST_JEDEC);
 
     tx_n = 0;
     host_send(NULL, 0);

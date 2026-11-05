@@ -141,6 +141,7 @@ static int ota_send_msg(uint32_t cmd, const uint8_t *body, uint32_t n)   /* n <=
 #ifndef OTA_FLASH_ID
 #define OTA_FLASH_ID() 0u
 #endif
+_Static_assert(sizeof FELUCCA_ID <= 24u, "FELUCCA_ID: 23 characters at most (the JEDEC ID follows at byte 24)");
 /* full 0: the name, '_' and three digits (M-UPGRADE 3.11's limit); 1: the whole identity. The loader's is whole */
 static void ota_reply_identity(int full)
 {
