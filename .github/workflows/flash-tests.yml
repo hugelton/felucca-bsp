@@ -13,3 +13,7 @@ jobs:
         env:
           CC: clang
         run: tests/run_flash_wait_test.sh
+      - name: Write regions, the access gate and the wrappers
+        env:
+          CC: clang
+        run: tests/run_flash_tests.sh
