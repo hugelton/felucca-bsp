@@ -43,7 +43,10 @@
 #include <stdint.h>
 
 #define FL_BOARD_MAP 1                                /* the flash gate takes these instead of the FM-1's */
-#define FL_JEDEC_ID     0x00EB6014u                   /* the part the boot expects (the FM-1's 0x856014) */
+#define FL_JEDEC_ID     0x00EB6014u                   /* the part named in the board notes */
+/* the parts found on these keyboards: units differ, so a build must not lock itself to one (a part it refuses
+ * leaves the store RAM-only and the app refusing updates) */
+#define FL_JEDEC_OK(id) ((id) == 0x00EB6014u || (id) == 0x00856014u || (id) == 0x00B36014u)
 #define FL_FLASH_SIZE   0x00100000u
 #define FL_SECTOR       0x1000u
 #define FL_APP_LO       0x00004000u                   /* the app area: the update loader's window */
