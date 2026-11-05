@@ -1,0 +1,15 @@
+name: CPU1 stack size test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  cpu1-stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The second core's job stack at a build's size (FM1_CPU1_USTACK_BYTES)
+        env:
+          CC: clang
+        run: tests/run_cpu1_stack_test.sh

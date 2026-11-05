@@ -551,6 +551,21 @@ static void fm1_led_dim_level(uint32_t lo)
     fm1__br_sel = lo != 0u;
     fm1__mid_n = (uint8_t)(lo ? FM1_LED_MID_N_LO : FM1_LED_MID_N);
 }
+/* the dim pulse at any width (main loop, any time; fm1__dim_k follows it in a few frames): `ns` nanoseconds a frame,
+ * between FM1_LED_DIM_MIN_NS and FM1_LED_DIM_MAX_NS (a lit LED is lit ~95 us a frame). It replaces the pulse
+ * fm1_led_dim_level chose until that is called again; the breath's peak and the mid level stay as that call left them.
+ * Not called: nothing in the build changes (a static function nothing uses) */
+#ifndef FM1_LED_DIM_MIN_NS
+#define FM1_LED_DIM_MIN_NS 500u   /* the shortest pulse asked for: about one line write and a few bits of the shift */
+#endif
+#ifndef FM1_LED_DIM_MAX_NS
+#define FM1_LED_DIM_MAX_NS 4000u  /* the longest: past it the shift is shorter than the pulse and the tick waits */
+#endif
+static void fm1_led_dim_ns(uint32_t ns)
+{
+    ns = ns < FM1_LED_DIM_MIN_NS ? FM1_LED_DIM_MIN_NS : ns > FM1_LED_DIM_MAX_NS ? FM1_LED_DIM_MAX_NS : ns;
+    fm1__dim_t = (uint16_t)FM1__DIM_T(ns);
+}
 /* column c's lit lines this frame: lit, a breath's lit frame (not dim), the mid level's lit frame */
 #define FM1__LIT(c) (fm1_led[c] | (fm1__br_lit ? fm1_led_breath[c] & ~fm1_led_dim[c] : 0u) | \
                      (!fm1__mid_ph ? fm1_led_mid[c] : 0u))

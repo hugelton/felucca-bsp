@@ -24,17 +24,17 @@
 #include <stdint.h>
 #include "fm1_cc.h"
 
-#define FM1_USB_CON0 (*(volatile uint32_t *)0x11800u)
-#define FM1_USB_CON1 (*(volatile uint32_t *)0x11804u)
-#define FM1_USB_EP_CNT(n) (*(volatile uint32_t *)(0x11808u + 4u * (n)))          /* EP0..3 */
-#define FM1_USB_EP0_ADR (*(volatile uint32_t *)0x11818u)
-#define FM1_USB_EP_TADR(n) (*(volatile uint32_t *)(0x1181Cu + 8u * ((n) - 1u)))  /* EP1..3 */
-#define FM1_USB_EP_RADR(n) (*(volatile uint32_t *)(0x11820u + 8u * ((n) - 1u)))  /* EP1..3 */
-#define FM1_USB_EP4_CNT (*(volatile uint32_t *)0x11834u)
-#define FM1_USB_EP4_TADR (*(volatile uint32_t *)0x11838u)
-#define FM1_USB_EP4_RADR (*(volatile uint32_t *)0x1183Cu)
-#define FM1_USB_IO_CON0 (*(volatile uint32_t *)0x51000u)
-#define FM1_CLK_CON1 (*(volatile uint32_t *)0x10010u)
+#define FM1_USB_CON0 (*(volatile uint32_t *)(uintptr_t)0x11800u)
+#define FM1_USB_CON1 (*(volatile uint32_t *)(uintptr_t)0x11804u)
+#define FM1_USB_EP_CNT(n) (*(volatile uint32_t *)(uintptr_t)(0x11808u + 4u * (n)))          /* EP0..3 */
+#define FM1_USB_EP0_ADR (*(volatile uint32_t *)(uintptr_t)0x11818u)
+#define FM1_USB_EP_TADR(n) (*(volatile uint32_t *)(uintptr_t)(0x1181Cu + 8u * ((n) - 1u)))  /* EP1..3 */
+#define FM1_USB_EP_RADR(n) (*(volatile uint32_t *)(uintptr_t)(0x11820u + 8u * ((n) - 1u)))  /* EP1..3 */
+#define FM1_USB_EP4_CNT (*(volatile uint32_t *)(uintptr_t)0x11834u)
+#define FM1_USB_EP4_TADR (*(volatile uint32_t *)(uintptr_t)0x11838u)
+#define FM1_USB_EP4_RADR (*(volatile uint32_t *)(uintptr_t)0x1183Cu)
+#define FM1_USB_IO_CON0 (*(volatile uint32_t *)(uintptr_t)0x51000u)
+#define FM1_CLK_CON1 (*(volatile uint32_t *)(uintptr_t)0x10010u)
 
 FM1_INLINE void fm1_usb_reset(void)
 {
