@@ -1,5 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: MPL-2.0
+# Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/fm1-flash-tests.XXXXXX")
