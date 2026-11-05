@@ -142,10 +142,10 @@ static const uint8_t FM1_BTN[FM1_NBTN] = {0x26, 0x76, 0x96, 0x56, 0x66, 0x36, 0x
 static const uint8_t FM1_ENC[FM1_NENC][4] = {
     {9, 7, 10, 7}, {3, 7, 4, 7}, {1, 7, 2, 7}, {11, 7, 12, 7}, {5, 7, 6, 7}, {7, 7, 8, 7}, {13, 7, 14, 7}, {15, 7, 0, 7},
 };
-/* LED n -> group << 4 | line bit. 0..17 the buttons' (in FM1_BTN's order); 18 the spare line of group 1, taken
- * as SEQ PLAY's second colour (TO BE CONFIRMED: which of the two lines is which colour) */
+/* LED n -> group << 4 | line bit. 0..17 the buttons' (in FM1_BTN's order); 18 SEQ PLAY's second colour, red
+ * (0x1E; SEQ REC's own line is 0x1B: Melodee's table, confirmed on a unit) */
 static const uint8_t FM1_LEDMAP[FM1_NLED] = {0x0C, 0x12, 0x00, 0x10, 0x0D, 0x1D, 0x02, 0x01, 0x09, 0x08, 0x0B, 0x0A,
-                                             0x11, 0x19, 0x18, 0x1A, 0x1C, 0x1E, 0x1B};
+                                             0x11, 0x19, 0x18, 0x1A, 0x1C, 0x1B, 0x1E};
 #define FM1_LED_PLAY2 18u
 /* the stock default curves (USRTRIM's, when the record is missing or bad) */
 static const uint16_t FM1_CURVE_KEY_DEFAULT[5] = {5, 640, 800, 920, 980};
@@ -228,13 +228,18 @@ static void fm1__sr_latch(void)
     FM1_PR(FM1_PA, FM1_OUT) |= FM1_SR_LATCH;
     FM1_PR(FM1_PA, FM1_OUT) &= ~FM1_SR_LATCH;
 }
-/* the 32-bit word into the chain (4 bytes by DMA, little-endian in memory as the stock sends it) and latched */
-static void fm1__sr_word(uint32_t w)
+/* the 32-bit word into the chain (4 bytes by DMA, little-endian in memory as the stock sends it); shifted only:
+ * the 595 outputs change at the latch, which the next tick gives it */
+static void fm1__sr_shift(uint32_t w)
 {
     fm1__sr_word_ram = w;
     FM1_SR_SPI_CON |= 0x4000u;
     FM1_SR_SPI_ADR = (uint32_t)(uintptr_t)&fm1__sr_word_ram;
     FM1_SR_SPI_CNT = 4u;
+}
+static void fm1__sr_word(uint32_t w)                  /* shifted and latched at once (init, the polled scan) */
+{
+    fm1__sr_shift(w);
     fm1__sr_wait();
     fm1__sr_latch();
 }
@@ -589,6 +594,11 @@ static void fm1__an_start(void)                      /* the next slot's conversi
     fm1_adc_start(CH[fm1_an.mux], fm1_an.con);
     fm1_an.pend = 1;
 }
+static inline uint32_t fm1__an_addr_after(void)      /* the mux address of the slot after this one (the next word's) */
+{
+    uint32_t s = fm1_an.slot + 1u >= 24u ? 0u : fm1_an.slot + 1u;
+    return s / 3u;
+}
 static inline void fm1__an_next(void)                /* the slot after this one: 24 of them, address first */
 {
     uint32_t s = fm1_an.slot + 1u >= 24u ? 0u : fm1_an.slot + 1u;
@@ -598,13 +608,22 @@ static inline void fm1__an_next(void)                /* the slot after this one:
 }
 
 /* ---- the scans ---- */
+/* The stock order, which the cell codes above assume (checked against the reference HAL, 2026-11-04): a tick reads
+ * the rows first, files them under the index of the word shifted last tick (whose latch comes next), then latches that
+ * word and shifts the next one. So raw[c] holds the rows seen while the chain's column c - 1 was selected: the codes'
+ * columns run one ahead of the 595 bit, and only this order makes them land on the right keys. */
 static void fm1_input_scan(void)                     /* one polled frame: keys and buttons (the loader) */
 {
     uint32_t p;
+    fm1__sr_shift(fm1__col_bits(0) | 0xFFFFu);
+    fm1__sr_wait();
     for (p = 0; p < FM1_NCOL; p++) {
-        fm1__sr_word(fm1__col_bits(p) | 0xFFFFu);
-        fm1__wait(FM1_SETTLE_US);
+        uint32_t n = p + 1u == FM1_NCOL ? 0u : p + 1u;
         fm1_in.raw[p] = (uint8_t)fm1__rows();
+        fm1__sr_latch();
+        fm1__sr_shift(fm1__col_bits(n) | 0xFFFFu);
+        fm1__sr_wait();
+        fm1__wait(FM1_SETTLE_US);
         fm1__keys(p);
         fm1_in.ticks++;
     }
@@ -615,20 +634,22 @@ static void fm1_input_tick(void)
 {
     uint32_t p = fm1__tick_col, n = p + 1u == FM1_NCOL ? 0u : p + 1u, g = fm1__led_grp;
     fm1_in.ticks++;
-    fm1_in.raw[p] = (uint8_t)fm1__rows();          /* column p has been latched one tick */
+    fm1_in.raw[p] = (uint8_t)fm1__rows();          /* the rows under word p's index, before its latch */
     if (fm1_an.pend)
         fm1__an_take();
-    if (n == 0u) {                                   /* a new frame: the other group's common, the breath */
+    if (p == 0u) {                                   /* a new frame: the other group's common, the breath */
         g = fm1__led_grp = (uint8_t)(g ^ 1u);
         fm1__commons(g);
         if (g == 0u)
             fm1__breath_frame();
     }
-    if (fm1_an.con)
-        fm1__an_next();
-    fm1__sr_word(fm1__col_bits(n) | fm1__led_low16(g, n, fm1_an.addr));
-    if (fm1_an.con)
+    fm1__sr_latch();                                 /* word p, shifted last tick with the next slot's mux address */
+    if (fm1_an.con) {
+        fm1__an_next();                              /* that slot: its conversion starts at the address just latched */
         fm1__an_start();
+    }
+    /* (word 0 is latched just after the next frame's common changes: it carries that group's lines) */
+    fm1__sr_shift(fm1__col_bits(n) | fm1__led_low16(n == 0u ? g ^ 1u : g, n, fm1__an_addr_after()));
     fm1__tick_col = (uint8_t)n;
     fm1__keys(p);
     if (n == 0u)
