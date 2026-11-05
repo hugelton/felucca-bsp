@@ -1,0 +1,15 @@
+name: SysEx queue test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  sysex-queue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Received SysEx frames queued with back-pressure (chip/usb.c), buffers of 300 to 2000 bytes
+        env:
+          CC: clang
+        run: tests/run_sysex_queue_test.sh
