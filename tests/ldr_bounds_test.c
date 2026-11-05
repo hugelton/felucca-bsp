@@ -220,6 +220,8 @@ static int ldr_erase_end(void) { return 0; }
 static void ldr_progress(uint32_t done, uint32_t total) { (void)done; (void)total; }
 #include "../loader/ldr_core.c"
 
+/* a flash.bin of another size: the board's own refusal (-15) before the size bounds (-3), when it has one */
+#define RC_SIZE (LDR_LAYOUT ? -15 : -3)
 #if defined(LDR_SLOT_SWITCH) && LDR_SLOT_SWITCH
 #define SWITCH 1
 #else
@@ -691,16 +693,16 @@ int main(void)
         /* hostile UFW headers: flash.bin's offset / size */
         q = pkg_default(); q.fl_size = 0x4000;
         snprintf(nm, sizeof nm, "%s: flash.bin size 0x4000 (the boot area only)", m);
-        refused(nm, &q, fast, H_OK, -3);
+        refused(nm, &q, fast, H_OK, RC_SIZE);
         q = pkg_default(); q.fl_size = APP_HI - 0x1000u;
         snprintf(nm, sizeof nm, "%s: flash.bin size below the app's end", m);
-        refused(nm, &q, fast, H_OK, -3);
+        refused(nm, &q, fast, H_OK, RC_SIZE);
         q = pkg_default(); q.fl_size = 0x100001u;
         snprintf(nm, sizeof nm, "%s: flash.bin size 1 MiB + 1", m);
-        refused(nm, &q, fast, H_OK, -3);
+        refused(nm, &q, fast, H_OK, RC_SIZE);
         q = pkg_default(); q.fl_size = 0xFFFFFFFFu;
         snprintf(nm, sizeof nm, "%s: flash.bin size 0xFFFFFFFF", m);
-        refused(nm, &q, fast, H_OK, -3);
+        refused(nm, &q, fast, H_OK, RC_SIZE);
         q = pkg_default(); q.fl_off = 0;
         snprintf(nm, sizeof nm, "%s: flash.bin offset 0", m);
         refused(nm, &q, fast, H_OK, -3);
@@ -731,7 +733,7 @@ int main(void)
         /* another board's package, or one not laid out for this board: nothing erased */
         q = pkg_default(); q.fl_size = 0x93000u; q.new_len = 0x93000u - 0x4000u - 0x100u;
         snprintf(nm, sizeof nm, "%s: an FM-1 package (flash.bin 0x93000)", m);
-        refused(nm, &q, fast, H_OK, -3);
+        refused(nm, &q, fast, H_OK, RC_SIZE);
         q = pkg_default(); q.fl_size = APP_HI + 0x1000u;
         snprintf(nm, sizeof nm, "%s: flash.bin a sector longer than the app area", m);
         refused(nm, &q, fast, H_OK, -15);
