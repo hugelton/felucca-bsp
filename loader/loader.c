@@ -12,7 +12,12 @@
 #define FELUCCA_OTA 1
 #define FELUCCA_OTA_DRYRUN 0
 #define FELUCCA_USB_PID 0x0002
+#ifdef LDR_SMK37                                    /* the SMK-37 (boards/smk37/): fm1-base tools/build.py -DLDR_SMK37 -DLDR_MODEL */
+#define FELUCCA_ID "ota-" LDR_MODEL "_900"           /* "ota-SMK-37 Pro_900", "ota-SMK-37 Elite_900", "ota-MKE-P37_900" */
+#define FM1_INPUT_TRIM 0                            /* (no factory curves needed: the buttons only) */
+#else
 #define FELUCCA_ID "ota-FM-1_900"
+#endif
 #define LDR_FAST_CHUNK 4096u           /* the fast install (ldr_core.c): one sector per read */
 #define OTA_FRAME_MAX 4200u            /* a decoded 4 KiB response (4111 B) */
 #define RING_PUBLISH() __asm__ volatile("" ::: "memory")
@@ -20,8 +25,28 @@
 #include "fm1_sys.h"
 /* the loader may write the app area and clear update records (program over one, or erase its own staging); never
  * the head, nor Felucca's store [0x97000, 0xE0000) (user data, never a record: ldr_core.c) */
+#ifdef LDR_SMK37
+/* the SMK-37 (boards/smk37/fm1_flash.h, first on the include path): the app area [0x4000, 0x9D000) and the records
+ * above it up to BTIF (0xC0000), and between the stock marker sector and USR; never BTIF, USRTRIM, USR, key_mac nor
+ * the store [0xC2000, 0xEA000). Its staging (ota.c's OTA_AREA, the record at 0xBFF00) is the board's */
+#define FL_RANGE_OK(off, n) (FL_IN(off, n, FL_APP_LO, FL_PROT1_LO) || FL_IN(off, n, FL_STOCK_MARK, FL_PROT2_LO))
+#define OTA_AREA FL_OTA_LO
+#define LDR_APP_HI FL_APP_HI
+#define LDR_REC_LO FL_REC_LO
+#define LDR_REC_HI FL_REC_HI
+#define LDR_DATA_LO FL_DATA_LO
+#define LDR_DATA_HI FL_DATA_HI
+#define LDR_SKIP(lo) ((lo) >= FL_PROT1_LO && (lo) < FL_PROT1_HI)   /* BTIF and USRTRIM: never, record or not */
+#define LDR_LAYOUT 1                                /* refuse a package not laid out for the SMK before any erase */
+#define LDR_APP_SLOT 0x97FBCu                       /* app.bin's slot (fm1-base tools/fm1pkg_make.py: the FM-1's 0x8DFBC + 0xA000) */
+#define LDR_VM_OFF FL_APP_HI                        /* the package's VM descriptor: the stock SMK's settings store, 0x9D000 */
+#else
 #define FL_RANGE_OK(off, n) (FL_IN(off, n, 0x4000u, 0x97000u) || FL_IN(off, n, 0xE0000u, 0xFC000u))
+#endif
 #include "fm1_flash.h"
+#if defined(LDR_SMK37) && !defined(FL_BOARD_MAP)
+#error "LDR_SMK37: build with -Iboards/smk37 before -Ichip (the board's fm1_flash.h)"
+#endif
 #include "../chip/libc.c"
 #include "../chip/usb.c"
 /* usb.c's SysEx queue (FELUCCA_SX_IN, the loader's default there) holds the fast install's reply whole: a 4 KiB read
@@ -29,6 +54,9 @@
 _Static_assert(((LDR_FAST_CHUNK + 15u) * 8u + 6u) / 7u + 2u <= FELUCCA_SX_IN, "FELUCCA_SX_IN: a 4 KiB reply whole");
 _Static_assert(LDR_FAST_CHUNK + 15u <= OTA_FRAME_MAX, "OTA_FRAME_MAX: a 4 KiB reply decoded");
 #include "ldr_screen.c"
+#ifdef LDR_SMK37
+#include "fm1_input.h"                               /* the 595 chain, scanned by hand (polled) */
+#endif
 
 static uint32_t ldr_ms(void)   /* monotonic ms; survives the TIMER4 wrap (178.9 s) */
 {
@@ -124,6 +152,16 @@ void ldr_main(void)
     fm1_wdt_arm(0x0D);                              /* ~8 s, fed by ldr_poll */
     fm1_time_init();
     ldr_screen_init();                              /* "UPDATING", "DO NOT UNPLUG", the bar, "0%" (~0.4 s) */
+#ifdef LDR_SMK37
+    /* the SMK's way out of a loader nobody talks to: OCTAVE- held while it starts (scanned by hand through the
+     * 595s: two polled frames, the debounce's two) goes to the chip's own update mode, where M-VAVE's updater
+     * and fm1_rescue reach it (the FM-1's REC at power-on, in the app). Not yet tried on a unit */
+    fm1_input_init();
+    fm1_input_scan();
+    fm1_input_scan();
+    if (fm1_in.buttons & (1u << FM1_BTN_OCT_DOWN))
+        fm1_enter_uboot();
+#endif
     usb_start();
     for (;;) {
         ldr_poll();
