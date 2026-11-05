@@ -9,7 +9,16 @@ step 2, the loader reads the whole package and writes it. In both steps the
 device asks (SysEx read requests on the logical image) and we answer. Then
 the FM-1 restarts and the installed identity is checked.
 
-  fm1_install.py PACKAGE.fwsc [--port NAME] [--yes] [--force]
+Step 2 is the fast install when the loader can (loader/ldr_core.c,
+LDR_FAST_CHUNK): before the upgrade command we say cmd 0x31 [1, 4096]; a
+loader that answers it reads a table of flash.bin's 4 KiB sectors (CRC16,
+CRC-32), checks it against the package before anything is erased, and asks
+only for the sectors that differ, 4 KiB at a time (a cut-off install resumes:
+what was written is skipped). A loader that does not answer within 0.5 s
+gets the classic protocol, unchanged; --classic never asks, nor does a
+package without this family's loader (the official V15: M-VAVE's loader).
+
+  fm1_install.py PACKAGE.fwsc [--port NAME] [--yes] [--force] [--classic]
   fm1_install.py FM-1.fwsc            (the official V15 file: back to the stock firmware)
   fm1_install.py --info [--port NAME]
 
@@ -21,11 +30,13 @@ Exit codes: 0 done, 1 cancelled or other error, 2 bad arguments or package,
 loader / no restart), 6 wrong model, or another identity after the install.
 """
 import argparse
+import binascii
 import hashlib
 import queue
 import re
 import sys
 import time
+import zlib
 
 HS_QUERY = bytes([0xF0, 0x00, 0x32, 0x45, 0x00, 0x00, 0x00, 0x40, 0x7F, 0xF7])
 # the handshake with the one-byte body 01 (00 59 11, length 1, 01, checksum FE): a firmware on chip/ota.c answers
@@ -35,6 +46,12 @@ HS_FULL = bytes([0xF0, 0x00, 0x32, 0x45, 0x08, 0x00, 0x00, 0x40, 0x00, 0x7E, 0x0
 UPGRADE = bytes([0xF0, 0x22, 0x24, 0x35, 0x7F, 0xF7])
 FINISH_CHECK, FINISH_WRITE = 0xE0000000, 0xF0000000
 MAXDATA = 512
+# the fast install (loader/ldr_core.c): the hello and the loader's answer (cmd 0x31 [version 1, read size 16-bit LE]),
+# the loader's progress (cmd 0x32 [sectors compared, all sectors: 16-bit LE each]), its reads of one 4 KiB sector and
+# of the sector table at TABLE + flash.bin's offset (per 4 KiB sector of flash.bin: CRC16 and CRC-32, little-endian)
+FAST_CMD, CHECK_CMD = 0x31, 0x32
+FAST_CHUNK = 4096
+TABLE, TABLE_END = 0xD0000000, 0xE0000000
 BLOCKS, BLK, KEEP = 20, 0x30, 0x2F
 LOADER_MARK = b"FELUCCA-LOADER-1"
 # the unmodified official FM-1 V15 (FM-1.fwsc from M-VAVE): returning to it is allowed without --force,
@@ -43,7 +60,8 @@ STOCK_V15_SHA256 = "db1642b2b6fa5c2cccb11ffd13878068bb28601678d3644049f99dc40e7e
 PORT_RE = re.compile(r"fm-1|felucca|ota|composite|sinco|usb-midi", re.I)   # never probe other gear
 
 # seconds; the tests shorten them
-DELAY = {"open": 0.3, "start": 2.0, "reply": 0.01, "loader": 3.0, "reboot": 3.0, "retry": 1.0,
+DELAY = {"open": 0.3, "start": 2.0, "start_fast": 0.05, "fast_hello": 0.5, "reply": 0.01, "loader": 3.0, "reboot": 3.0,
+         "retry": 1.0,
          "poll": 1.0, "hs": 1.0, "hs_full": 0.6, "idle_check": 8.0, "idle_write": 180.0,
          "wait_loader": 30.0, "wait_reboot": 40.0}
 
@@ -91,6 +109,43 @@ def response(addr, data, fl=0):
     body += addr.to_bytes(4, "little") + bytes([n & 0xFF, (n >> 8) & 0xFF, 0]) + bytes(data)
     body.append(~sum(body[6:]) & 0xFF)
     return b"\xF0" + pack7(body) + b"\xF7"
+
+
+def frame(cmd, body):
+    """a host frame in the update protocol's framing: F0 pack7(00 59 cmd len24 body chk) F7"""
+    n = len(body)
+    u = bytes([0x00, 0x59, cmd, n & 0xFF, (n >> 8) & 0xFF, n >> 16]) + bytes(body)
+    return b"\xF0" + pack7(u + bytes([~sum(body) & 0xFF])) + b"\xF7"
+
+
+FAST_HELLO = frame(FAST_CMD, bytes([1, FAST_CHUNK & 0xFF, FAST_CHUNK >> 8]))
+
+
+def parse_frame(pkt):
+    """-> (cmd, body) of any frame in the update protocol's framing, checksum checked, or None"""
+    if len(pkt) < 2 or pkt[0] != 0xF0 or pkt[-1] != 0xF7:
+        return None
+    u = unpack7(pkt[1:-1])
+    if len(u) < 7 or u[:2] != b"\x00\x59":
+        return None
+    n = int.from_bytes(u[3:6], "little")
+    if len(u) != 7 + n or ~sum(u[6:6 + n]) & 0xFF != u[6 + n]:
+        return None
+    return u[2], u[6:6 + n]
+
+
+def crc16(data, c=0):
+    """the UFW's CRC16 (XMODEM: poly 0x1021, init 0), as chip/ota.c ota_crc16"""
+    return binascii.crc_hqx(data, c)
+
+
+def sector_table(image, off, n):
+    """the fast install's table: n entries, one per 4 KiB sector of the image from off, [CRC16, CRC-32] LE"""
+    out = bytearray()
+    for k in range(n):
+        sec = image[off + k * FAST_CHUNK:off + (k + 1) * FAST_CHUNK]
+        out += crc16(sec).to_bytes(2, "little") + zlib.crc32(sec).to_bytes(4, "little")
+    return bytes(out)
 
 
 def parse_request(pkt):
@@ -298,8 +353,11 @@ class Updater:
             time.sleep(DELAY["retry"])
         return None
 
-    def serve(self, link, image, finish, idle, progress):
-        """answer read requests until the device asks for `finish`; -> (served, finished, lost)"""
+    def serve(self, link, image, finish, idle, progress, loader=False, fast=False, checked=None):
+        """answer read requests until the device asks for `finish`; -> (served, finished, lost).
+        The loader (loader=True) may also ask 4 KiB reads and the sector table (the fast install: one it said yes to,
+        fast=True, or a fast session it kept from before: the hello went unheard then) and say how far it compared
+        (cmd 0x32 -> checked(k, n))"""
         served, last = 0, time.monotonic()
         while True:
             pkt = link.read(DELAY["poll"])
@@ -311,6 +369,10 @@ class Updater:
                 continue
             r = parse_request(pkt)
             if not r:
+                f = parse_frame(pkt) if loader and checked else None
+                if f and f[0] == CHECK_CMD and len(f[1]) == 4:
+                    last = time.monotonic()
+                    checked(int.from_bytes(f[1][:2], "little"), int.from_bytes(f[1][2:], "little"))
                 continue
             fl, addr, n = r
             last = time.monotonic()
@@ -319,13 +381,22 @@ class Updater:
                 if addr == finish:
                     return served, True, False
                 continue
-            if n > MAXDATA or addr + n > len(image):
-                raise InstallError("badreq", f"the device asked for {addr:#x}+{n}, outside the package")
-            time.sleep(DELAY["reply"])
-            if not link.send(response(addr, image[addr:addr + n], fl)):
+            if loader and TABLE <= addr < TABLE_END:
+                off, k = addr - TABLE, n // 6
+                if n == 0 or n % 6 or n > FAST_CHUNK or off + k * FAST_CHUNK > len(image):
+                    raise InstallError("badreq", f"the device asked for the table at {off:#x} for {n} B, "
+                                                 "outside the package")
+                data = sector_table(image, off, k)
+            else:
+                if n > (FAST_CHUNK if loader else MAXDATA) or addr + n > len(image):
+                    raise InstallError("badreq", f"the device asked for {addr:#x}+{n}, outside the package")
+                data = image[addr:addr + n]
+            if not fast:
+                time.sleep(DELAY["reply"])
+            if not link.send(response(addr, data, fl)):
                 return served, False, True
             served += 1
-            progress(served, addr + n)
+            progress(served, addr, n)
 
     def check(self, dev, image, step):
         """step 1: the running firmware checks the package and starts the loader"""
@@ -333,7 +404,7 @@ class Updater:
         dev.link.send(UPGRADE)
         time.sleep(DELAY["start"])
         served, finished, lost = self.serve(dev.link, image, FINISH_CHECK, DELAY["idle_check"],
-                                            lambda k, end: step("check", k))
+                                            lambda k, addr, n: step("check", k))
         dev.link.close()
         if not finished:
             raise InstallError("lost" if lost else "stopped",
@@ -347,13 +418,52 @@ class Updater:
                                            "run the install again: the FM-1 stays in update mode until it is done")
         return ota
 
-    def write(self, ota, image, step):
-        """step 2: the loader reads and writes the whole package, then restarts"""
+    def fast_hello(self, link):
+        """the fast install's word: True when the loader answers it within DELAY["fast_hello"] (it holds for the next
+        session); an older loader, or one still in a session it kept, says nothing"""
+        link.drain()
+        if not link.send(FAST_HELLO):
+            return False
+        end = time.monotonic() + DELAY["fast_hello"]
+        while (left := end - time.monotonic()) > 0:
+            p = link.read(left)
+            if p is None:
+                break
+            f = parse_frame(p)
+            if f and f[0] == FAST_CMD and len(f[1]) == 3 and f[1][0] == 1 and \
+                    int.from_bytes(f[1][1:], "little") >= FAST_CHUNK:
+                return True
+        return False
+
+    def write(self, ota, image, step, classic=False):
+        """step 2: the loader reads and writes the package (the fast install when it says yes), then restarts"""
         step("write", 0)
+        fast = not classic and self.fast_hello(ota.link)
+        step("mode", "fast" if fast else "classic")
+        bar = {"pct": 0, "off": None, "n": 0}
+
+        def show(pct):                                  # the bar never goes back
+            if pct > bar["pct"]:
+                bar["pct"] = pct
+                step("write", pct)
+
+        def read(k, addr, n):
+            if TABLE <= addr < TABLE_END:               # the table: flash.bin's offset and its sectors
+                bar["off"], bar["n"] = addr - TABLE, n // 6
+            elif bar["off"] is not None:                # a sector of the fast install
+                if bar["n"] and addr >= bar["off"]:
+                    show(min(99, ((addr - bar["off"]) // FAST_CHUNK + 1) * 100 // bar["n"]))
+            else:                                       # the classic install: its two passes, as they come
+                step("write", min(99, (addr + n) * 100 // len(image)))
+
+        def checked(k, n):                              # cmd 0x32: the app area's sectors compared, kept or written
+            if n:
+                show(min(99, k * 100 // n))
+
         ota.link.send(UPGRADE)
-        time.sleep(DELAY["start"])
-        served, finished, lost = self.serve(ota.link, image, FINISH_WRITE, DELAY["idle_write"],
-                                            lambda k, end: step("write", min(99, end * 100 // len(image))))
+        time.sleep(DELAY["start_fast" if fast else "start"])
+        served, finished, lost = self.serve(ota.link, image, FINISH_WRITE, DELAY["idle_write"], read,
+                                            loader=True, fast=fast, checked=checked)
         ota.link.close()
         if not finished:
             raise InstallError("lost" if lost else "stopped",
@@ -373,14 +483,14 @@ class Updater:
         step("done", back.id.text)
         return back.id.text
 
-    def install(self, dev, image, product, step=lambda *a: None):
+    def install(self, dev, image, product, step=lambda *a: None, classic=False):
         """running firmware -> loader -> new firmware; dev from find(). A device already in
         update mode only needs the write."""
         if model_of(dev.id.text) != model_of(product):
             dev.link.close()
             raise InstallError("model", f"the device is {dev.id.text}, the package is for {product}")
         ota = dev if dev.id.loader else self.check(dev, image, step)
-        self.write(ota, image, step)
+        self.write(ota, image, step, classic)
         return self.verify(product, step)
 
 
@@ -418,6 +528,10 @@ class Progress:
             self.put(f"checking the package ({a} reads)")
         elif k == "write":
             self.put(f"writing {a:3d}%")
+        elif k == "mode":
+            self.end()
+            print("the loader writes only the sectors that changed (fast install)" if a == "fast" else
+                  "the loader reads and writes the whole package (classic install)", file=self.out, flush=True)
         else:
             self.end()
             msg = {"start": f"starting the update on {a}", "loader": "switching to update mode",
@@ -457,7 +571,9 @@ def run(a, backend, out, ask):
         return 1
     prog = Progress(out)
     try:
-        up.install(dev, image, product, prog)
+        # the fast install's hello only to a loader of this family (the package's: its marker); M-VAVE's loader,
+        # which the official V15 brings, never hears it
+        up.install(dev, image, product, prog, a.classic or LOADER_MARK not in image)
     finally:
         prog.end()
     return 0
@@ -477,6 +593,7 @@ def main(argv=None, backend=None, out=sys.stdout, ask=ask_tty):
     ap.add_argument("--port", metavar="NAME", help="MIDI port to use (part of its name)")
     ap.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     ap.add_argument("--force", action="store_true", help="install a package without the update-loader marker")
+    ap.add_argument("--classic", action="store_true", help="never ask the loader for the fast install")
     a = ap.parse_args(argv)
     if bool(a.info) == bool(a.package):
         ap.error("give a PACKAGE.fwsc or --info")

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import fm1_install as I  # noqa: E402
 
-I.DELAY.update(open=0, start=0.01, reply=0, loader=0.01, reboot=0.01, retry=0.02, poll=0.05, hs=0.1, hs_full=0.1,
+I.DELAY.update(open=0, start=0.01, start_fast=0.01, fast_hello=0.05, reply=0, loader=0.01, reboot=0.01, retry=0.02, poll=0.05, hs=0.1, hs_full=0.1,
                idle_check=0.4, idle_write=0.4, wait_loader=2, wait_reboot=2)
 failed = 0
 
@@ -210,6 +210,11 @@ def installs():
     dev = FakeFM1(image, identity="ota-FM-1_900", name="Felucca Update")
     rc, out, err = cli([p, "--yes"], dev)
     ok(rc == 0 and dev.bad == 0 and dev.upgrades == 1 and "update mode" in out, "install: device already in update mode -> finishes the write")
+    ok(dev.sent.count(I.FAST_HELLO) == 1 and "classic install" in out,
+       "install: the fast install's hello, unanswered (an older loader): the classic install")
+    dev = FakeFM1(image, identity="ota-FM-1_900", name="Felucca Update")
+    rc, out, err = cli([p, "--yes", "--classic"], dev)
+    ok(rc == 0 and dev.bad == 0 and I.FAST_HELLO not in dev.sent, "install --classic: no hello")
 
     dev = FakeFM1(image)
     rc, out, err = cli([p], dev, answer=False)
@@ -292,7 +297,8 @@ def errors():
     ok(rc == 2 and "no update loader of this family" in err and dev.sent == [], "package without the loader marker -> exit 2, no MIDI")
     dev = FakeFM1(I.logical_image(package(marker=False)))
     rc, out, err = cli([plain, "--yes", "--force"], dev)
-    ok(rc == 0 and dev.bad == 0, "... installs with --force")
+    ok(rc == 0 and dev.bad == 0 and I.FAST_HELLO not in dev.sent,
+       "... installs with --force (no fast install's hello: not this family's loader)")
     rc, out, err = cli([pkgfile("short.fwsc", b"\0" * 100), "--yes"], FakeFM1(image))
     ok(rc == 2 and "too short" in err, "not a package -> exit 2")
     rc, out, err = cli([str(TMP / "missing.fwsc"), "--yes"], FakeFM1(image))

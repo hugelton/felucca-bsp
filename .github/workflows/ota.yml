@@ -15,3 +15,7 @@ jobs:
         run: tests/run_ota_test.sh
       - name: The installer against a simulated FM-1
         run: python3 tests/install_test.py
+      - name: The installer's step 2 against the real update loader on a pipe (classic, fast, resumed, refused)
+        env:
+          CC: clang
+        run: python3 tests/install_fast_test.py
