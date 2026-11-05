@@ -67,8 +67,8 @@ class FakeFM1:
     """a MIDI backend with one FM-1 on it"""
 
     def __init__(self, image, identity="FM-1_015", name="FM-1", unplug_after=None, after_write="FM-1_900",
-                 stall_after=None, bad_addr=None, new_ota=(), jedec=0):
-        self.image, self.unplug_after, self.after_write = image, unplug_after, after_write
+                 stall_after=None, bad_addr=None, new_ota=(), jedec=0, loader="ota-FM-1_900"):
+        self.image, self.unplug_after, self.after_write, self.loader = image, unplug_after, after_write, loader
         self.new_ota, self.jedec = set(new_ota), jedec   # identities whose ota.c cuts the plain answer; PR #29's bytes
         self.stall_after, self.bad_addr = stall_after, bad_addr
         self.served = self.bad = self.upgrades = self.hs_full = 0
@@ -133,7 +133,7 @@ class FakeFM1:
             if self.stall_after and self.served >= self.stall_after:
                 return
             if addr == I.FINISH_CHECK:
-                threading.Timer(0.05, self.boot, ("ota-FM-1_900", "Felucca Update")).start()
+                threading.Timer(0.05, self.boot, (self.loader, "Felucca Update")).start()
             elif addr == I.FINISH_WRITE:
                 threading.Timer(0.05, self.boot, (self.after_write, "Felucca")).start()
             else:
@@ -305,6 +305,33 @@ def errors():
     ok(rc == 2, "missing file -> exit 2")
 
 
+def smk37():
+    """the SMK-37 (boards/smk37/, loader/ldr_smk37.h): packages "SMK-37 Pro_", "SMK-37 Elite_", "MKE-P37_", the
+    loader "ota-<model>_900"; its ports are found; a package goes only to its own model, both ways, nothing sent else"""
+    for product, port in (("SMK-37 Elite_1100", "Melodee SMK-37"), ("MKE-P37_1100", "MKE-P37")):
+        raw = package(product)
+        model = product.split("_")[0]
+        ok(I.product_of(raw) == product, f"product_of: {product}")
+        dev = FakeFM1(I.logical_image(raw), identity=f"{model}_1000", name=port, after_write=product,
+                      loader=f"ota-{model}_900")
+        rc, out, err = cli([pkgfile("smk.fwsc", raw), "--yes"], dev)
+        ok(rc == 0 and dev.bad == 0 and dev.upgrades == 2 and f"done: the FM-1 runs {product}" in out,
+           f"install: {model}'s package on its own keyboard (port {port!r}), through its loader")
+    elite = package("SMK-37 Elite_1100")
+    for ident, port, what in (("SMK-37 Pro_1100", "SMK-37 Pro", "an Elite package on a Pro"),
+                              ("FM-1_900", "FM-1", "an SMK-37 package on an FM-1"),
+                              ("ota-FM-1_900", "Felucca Update", "an SMK-37 package on an FM-1's update loader")):
+        dev = FakeFM1(I.logical_image(elite), identity=ident, name=port)
+        rc, out, err = cli([pkgfile("elite.fwsc", elite), "--yes"], dev)
+        ok(rc == 6 and dev.upgrades == 0 and "the package is for SMK-37 Elite_1100" in err, f"{what}: exit 6, nothing sent")
+    fm1 = package()
+    for ident, port, what in (("SMK-37 Elite_1100", "Melodee SMK-37", "an FM-1 package on an SMK-37"),
+                              ("ota-SMK-37 Elite_900", "Felucca Update", "an FM-1 package on an SMK-37's update loader")):
+        dev = FakeFM1(I.logical_image(fm1), identity=ident, name=port)
+        rc, out, err = cli([pkgfile("ok.fwsc", fm1), "--yes"], dev)
+        ok(rc == 6 and dev.upgrades == 0 and "the package is for FM-1_900" in err, f"{what}: exit 6, nothing sent")
+
+
 def against_js():
     clean = ROOT / "build/felucca.fwsc"
     if not shutil.which("node") or not clean.exists():
@@ -341,6 +368,7 @@ def official():
 wire()
 installs()
 errors()
+smk37()
 against_js()
 official()
 shutil.rmtree(TMP, ignore_errors=True)

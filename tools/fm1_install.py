@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
 # Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
-"""Install a firmware package (.fwsc) on an FM-1 over USB-MIDI.
+"""Install a firmware package (.fwsc) on an FM-1 (or an SMK-37: boards/smk37/) over USB-MIDI.
 
 Step 1, the
 running firmware reads parts of the package and starts the update loader;
@@ -23,7 +23,10 @@ package without this family's loader (the official V15: M-VAVE's loader).
   fm1_install.py --info [--port NAME]
 
 If the FM-1 is still in update mode (an earlier install was cut off), the
-install finishes the write. Needs mido with python-rtmidi.
+install finishes the write. A package goes only to its own model: an FM-1's
+to an FM-1, an SMK-37 Pro's, Elite's or MKE-P37's to that keyboard (its
+identity before the '_'), checked before anything is sent. Needs mido with
+python-rtmidi.
 
 Exit codes: 0 done, 1 cancelled or other error, 2 bad arguments or package,
 3 FM-1 not found, 4 connection lost or the device stopped, 5 timeout (no
@@ -57,7 +60,7 @@ LOADER_MARK = b"FELUCCA-LOADER-1"
 # the unmodified official FM-1 V15 (FM-1.fwsc from M-VAVE): returning to it is allowed without --force,
 # as Felucca's web installer does
 STOCK_V15_SHA256 = "db1642b2b6fa5c2cccb11ffd13878068bb28601678d3644049f99dc40e7edb8a"
-PORT_RE = re.compile(r"fm-1|felucca|ota|composite|sinco|usb-midi", re.I)   # never probe other gear
+PORT_RE = re.compile(r"fm-1|felucca|ota|composite|sinco|usb-midi|smk-37|mke-p37", re.I)   # never probe other gear
 
 # seconds; the tests shorten them
 DELAY = {"open": 0.3, "start": 2.0, "start_fast": 0.05, "fast_hello": 0.5, "reply": 0.01, "loader": 3.0, "reboot": 3.0,
