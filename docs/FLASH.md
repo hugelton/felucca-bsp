@@ -77,7 +77,9 @@ atomic storage transactions. Applications retain responsibility for journals,
 checksums and power-loss recovery of their own data.
 
 Every transaction saves and restores the caller's full ICFG value, including
-when interrupts were already disabled. `fl_plain_window_init()` follows the same
+when interrupts were already disabled. `irq_save` clears ICFG bits 8 and 9:
+bit 8 alone (the SDK's `local_irq_save`) leaves priority-7 sources running, and
+their handlers may fetch from XIP while it is off. `fl_plain_window_init()` follows the same
 rule. Wrappers release the mask between chunks, allowing input/USB service.
 Call these blocking APIs from the main loop, after arranging audio silence where
 necessary; sector erase can take hundreds of milliseconds.

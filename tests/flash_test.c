@@ -135,11 +135,11 @@ static void locking(void)
         reset(); cfg = states[i];
         outer = irq_save();
         CHECK(outer == states[i]);
-        CHECK(cfg == (states[i] & ~0x100u));
+        CHECK(cfg == (states[i] & ~0x300u));
         inner = irq_save();
         CHECK(inner == cfg);
         irq_restore(inner);
-        CHECK(cfg == (states[i] & ~0x100u));
+        CHECK(cfg == (states[i] & ~0x300u));
         irq_restore(outer);
         CHECK(cfg == states[i]);
     }

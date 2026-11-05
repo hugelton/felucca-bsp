@@ -48,9 +48,12 @@ static volatile uint32_t fm1_flash_cpu1_idle;
 FM1_INLINE uint32_t irq_save(void)
 {
     uint32_t f = FM1_FLASH_ICFG_READ();
-    /* ICFG bit 8 is the global IRQ enable, as in the AC79 SDK irq.h.
-     * Preserve all other bits, including the current interrupt context. */
-    FM1_FLASH_ICFG_WRITE(f & ~0x100u);
+    /* ICFG bit 8 is the global IRQ enable the AC79 SDK's local_irq_save clears; it leaves priority-7 sources
+     * running (fm1_irq_attach takes 0..7; fm1-base gives a vendor library's interrupts up to 7), and their
+     * handlers may run from XIP, which the flash driver switches off. Bit 9 is the one cli clears (what this
+     * irq_save ran before): clear both, so everything is held off as before, and give the caller's ICFG back on
+     * restore (it nests). Preserve all other bits, including the current interrupt context. */
+    FM1_FLASH_ICFG_WRITE(f & ~0x300u);
     FM1_FLASH_SYNC();
     return f;
 }
