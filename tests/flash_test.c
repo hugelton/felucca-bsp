@@ -4,6 +4,9 @@
  * Run in default, custom-region, loader-override and expanded-capacity modes;
  * tests/run_flash_tests.sh also checks invalid configurations. */
 #include <stdint.h>
+#ifndef FM1_CPU1
+#define FM1_CPU1 1
+#endif
 #include <stdio.h>
 
 #if TEST_LAYOUT == 1
@@ -61,7 +64,7 @@ static unsigned checks, fails;
 static void reset(void)
 {
     calls = fail_at = core = c1 = syncs = 0;
-    cfg = 0x5B5u;
+    cfg = 0x7B5u;                                   /* both interrupt enables set (bits 8 and 9) */
     fm1_flash_cpu1_idle = 0;
 }
 
@@ -107,7 +110,7 @@ static void policy(void)
 
 static void locking(void)
 {
-    const uint32_t states[] = {0u, 0x100u, 0x5B5u, 0x4B5u, UINT32_MAX};
+    const uint32_t states[] = {0u, 0x100u, 0x200u, 0x300u, 0x5B5u, 0x4B5u, 0x7B5u, UINT32_MAX};
     unsigned i;
     for (i = 0; i < sizeof states / sizeof states[0]; i++) {
         uint32_t outer, inner;
@@ -124,12 +127,14 @@ static void locking(void)
     }
     reset();
     CHECK(!fm1_flash_access_ok()); /* enabled IRQs */
-    cfg &= ~0x100u;
-    CHECK(fm1_flash_access_ok()); /* CPU1 never started */
+    cfg &= ~0x200u;
+    CHECK(fm1_flash_access_ok()); /* cli (bit 9) alone: off, as the SDK's cpu_irq_disabled */
+    cfg = 0x7B5u & ~0x100u;
+    CHECK(fm1_flash_access_ok()); /* irq_save (bit 8); CPU1 never started */
     c1 = 10u;
     CHECK(fm1_flash_access_ok()); /* CPU1 held */
     c1 = 8u;
-    CHECK(!fm1_flash_access_ok()); /* unknown/busy CPU1 */
+    CHECK(fm1_flash_access_ok() == !FM1_CPU1); /* unknown/busy CPU1: refused in a build with the second core */
     fm1_flash_cpu1_idle = 1;
     CHECK(fm1_flash_access_ok()); /* registered RAM idle */
     core = 1;
@@ -170,8 +175,13 @@ static void wrappers(void)
     CHECK(fl_write(off, RAM(0x1C10000u), 600) == FL_ERR_TIMEOUT);
     CHECK(calls == 2 && cfg == state); /* disabled stays disabled on failure */
     reset(); c1 = 8;
+#if FM1_CPU1
     CHECK(fl_write(off, RAM(0x1C10000u), 1u) == FL_ERR_BUSY);
-    CHECK(calls == 0 && cfg == 0x5B5u);
+    CHECK(calls == 0 && cfg == 0x7B5u);
+#else
+    CHECK(fl_write(off, RAM(0x1C10000u), 1u) == 0 && calls == 1); /* no second core in this build */
+    calls = 0;
+#endif
     fm1_flash_cpu1_idle = 1;
     CHECK(fl_write(off, RAM(0x1C10000u), 1u) == 0 && calls == 1);
     reset(); state = cfg;
@@ -183,20 +193,24 @@ static void wrappers(void)
     CHECK(calls == 0);
     fail_at = 2;
     CHECK(fl_read(0, RAM(0x1C10000u), 600) == FL_ERR_TIMEOUT && calls == 2);
-    CHECK(cfg == 0x5B5u);
+    CHECK(cfg == 0x7B5u);
     reset(); state = cfg;
     rc = fl_erase4k(off & ~0xFFFu, (uint32_t *)RAM(0x1C10000u));
     CHECK(rc == 0 && calls == 1 && cfg == state);
+#if FM1_CPU1
     c1 = 8;
     CHECK(fl_erase4k(off & ~0xFFFu, (uint32_t *)RAM(0x1C10000u)) == FL_ERR_BUSY);
     CHECK(calls == 1 && cfg == state);
+#endif
     reset(); cfg &= ~0x100u; state = cfg;
     CHECK(fl_jedec() == 0x856014u && cfg == state);
     CHECK(fl_status() == 0 && cfg == state);
     CHECK(fl_uid(RAM(0x1C10000u)) == 0 && cfg == state);
+#if FM1_CPU1
     c1 = 8;
     CHECK(fl_jedec() == 0 && cfg == state);
     CHECK(fl_status() == UINT32_MAX && cfg == state);
+#endif
     CHECK(fl_verify_xip(FM1_FLASH_PLAIN_HI - 1u, RAM(0x1C10000u), 2u) == FL_ERR_RANGE);
     CHECK(fl_verify_xip(FM1_FLASH_PLAIN_LO, RAM(0x2000000u), 1u) == FL_ERR_BUFFER);
 }
@@ -204,6 +218,6 @@ static void wrappers(void)
 int main(void)
 {
     policy(); locking(); wrappers();
-    printf("flash layout %d: %u checks, %u failures\n", TEST_LAYOUT, checks, fails);
+    printf("flash layout %d (FM1_CPU1 %d): %u checks, %u failures\n", TEST_LAYOUT, FM1_CPU1, checks, fails);
     return fails != 0;
 }

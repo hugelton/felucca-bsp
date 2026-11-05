@@ -6,8 +6,9 @@
 /* Hold the second core (CPU1), safely. Holding it can abort a bus access it has outstanding, and that raises a
  * delayed bus-invalid flag on CPU0: the bus traps are masked, CPU1 held (C1_CON 0x1EEE004: bit 1 set, then bit 3
  * cleared), the flag given time to arrive and cleared, then the debug enables and the write lock put back.
- * Registers only: also first thing at a start, before the RAM is set up (a reset that left CPU1 running), and on
- * the way to a reset or an update. Harmless when CPU1 never ran. */
+ * Registers, and the flash gate's idle word (fm1_flash_access.h: a held CPU1 is no longer idle in its RAM loop; a
+ * word in .bss, so harmless before the RAM is set up): also first thing at a start (a reset that left CPU1
+ * running), and on the way to a reset or an update. Harmless when CPU1 never ran. */
 #pragma once
 #include <stdint.h>
 #include "fm1_cc.h"

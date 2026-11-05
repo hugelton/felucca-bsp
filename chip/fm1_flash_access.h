@@ -3,8 +3,9 @@
 /* Shared by the RAM flash driver and the CPU1 worker. Include in the same
  * compilation unit as both: like the rest of this BSP, the state is static.
  * Only CPU0 may enter a flash transaction, with its interrupts masked.
- * A running CPU1 must have acknowledged that it is in its RAM-only idle loop.
- * Unknown workers are refused; they are never forcibly stopped mid-job. */
+ * In a build with the second core (FM1_CPU1), a running CPU1 must have acknowledged
+ * that it is in its RAM-only idle loop. Unknown workers are refused; they are never
+ * forcibly stopped mid-job. */
 #pragma once
 #include <stdint.h>
 #include "fm1_cc.h"
@@ -60,12 +61,22 @@ FM1_INLINE void irq_restore(uint32_t f)
     FM1_FLASH_ICFG_WRITE(f);
 }
 
+/* CPU0, with its interrupts off: ICFG bit 8 (irq_save, the SDK's local_irq_save) or bit 9 (cli) clear, as the SDK's
+ * cpu_irq_disabled counts them ((icfg & 0x300) != 0x300). The second core is checked only in a build that has it
+ * (FM1_CPU1, defined before the first BSP header): one without it never starts CPU1, so it neither holds CPU1 at its
+ * start nor depends on that; a CPU1 running there is not this build's (as before this gate). */
 FM1_INLINE int fm1_flash_access_ok(void)
 {
-    uint32_t c;
-    if (FM1_FLASH_CORE() != 0 || (FM1_FLASH_ICFG_READ() & 0x100u))
+    if (FM1_FLASH_CORE() != 0 || (FM1_FLASH_ICFG_READ() & 0x300u) == 0x300u)
         return 0;
-    FM1_FLASH_SYNC();
-    c = FM1_FLASH_C1_CON;
-    return !(c & 8u) || (c & 2u) || fm1_flash_cpu1_idle == 1u;
+#if FM1_CPU1
+    {
+        uint32_t c;
+        FM1_FLASH_SYNC();
+        c = FM1_FLASH_C1_CON;
+        return !(c & 8u) || (c & 2u) || fm1_flash_cpu1_idle == 1u;
+    }
+#else
+    return 1;
+#endif
 }

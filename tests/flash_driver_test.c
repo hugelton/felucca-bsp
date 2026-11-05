@@ -3,6 +3,9 @@
 /* Actual low-level driver, with register/CPU primitives replaced. Verify that
  * invalid requests and unsafe contexts return before touching the bus. */
 #include <stdint.h>
+#ifndef FM1_CPU1
+#define FM1_CPU1 1
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,8 +74,8 @@ int main(void)
 {
     uint32_t before[9];
     unsigned i;
-    reset(); cfg = 0x100u;
-    refused(FL_ERR_BUSY); /* IRQs still enabled */
+    reset(); cfg = 0x300u;
+    refused(FL_ERR_BUSY); /* IRQs still enabled (bits 8 and 9) */
     reset(); core = 1;
     refused(FL_ERR_BUSY); /* wrong core */
     reset(); c1 = 8;

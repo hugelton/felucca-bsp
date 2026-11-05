@@ -5,15 +5,19 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/fm1-flash-tests.XXXXXX")
 trap 'rm -rf "$OUT"' EXIT HUP INT TERM
 CC=${CC:-cc}
-for layout in 0 1 2 3 4; do
+# FLASH_TEST_SANITIZE= (empty) builds without the sanitizers (on a Mac where ASan hangs at start-up).
+SANITIZE=${FLASH_TEST_SANITIZE--fsanitize=address,undefined}
+for layout in 0 1 2 3 4 0-nocpu1; do
+    cpu1=1
+    case "$layout" in *-nocpu1) layout=${layout%-nocpu1}; cpu1=0 ;; esac
     "$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -O2 \
-        -fsanitize=address,undefined -I"$ROOT/chip" -DTEST_LAYOUT="$layout" \
+        $SANITIZE -I"$ROOT/chip" -DTEST_LAYOUT="$layout" -DFM1_CPU1="$cpu1" \
         "$ROOT/tests/flash_test.c" -o "$OUT/flash-$layout"
     "$OUT/flash-$layout"
 done
 for plain_hi in 0x100000u 0xA0000u; do
     "$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -Wno-int-to-pointer-cast -O2 \
-        -fsanitize=address,undefined -I"$ROOT/chip" -DFM1_FLASH_PLAIN_HI="$plain_hi" \
+        $SANITIZE -I"$ROOT/chip" -DFM1_FLASH_PLAIN_HI="$plain_hi" \
         "$ROOT/tests/flash_driver_test.c" -o "$OUT/driver"
     "$OUT/driver"
 done
