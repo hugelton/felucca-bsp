@@ -72,6 +72,7 @@ FM-1's names and refuses a build that gives no regions. The SMK-37's:
 | `0xC2000..0xEA000` | Main store |
 | `0xEA000..0xEB000` | The stock firmware's marker (released once) |
 | `0xEB000..0xEE000` | Globals |
+| `0xEE000..0xF4000` | Extra data (`FL_FREE`: unlisted in the stock table; no record rule) |
 | `0xF4000..0xFE000`, `0xFF000..0x100000` | USR, key_mac: never written |
 
 Its updater (`loader/ldr_smk37.h`) writes `0x4000..0xC0000` only: the app area,
