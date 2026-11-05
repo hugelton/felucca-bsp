@@ -115,7 +115,7 @@ static void policy(void)
             int win = (s >= FL_DATA_LO && s < FL_DATA_HI) || (s >= FL_GLOB_LO && s < FL_GLOB_HI) ||
                       (s >= FL_AUTO_LO && s < FL_AUTO_HI) || (s >= FL_XDATA0_LO && s < FL_XDATA0_HI) ||
                       (s >= FL_XDATA1_LO && s < FL_XDATA1_HI) || (s >= FL_OTA_LO && s < FL_OTA_HI) ||
-                      s == FL_STOCK_MARK;
+                      (s >= FL_FREE_LO && s < FL_FREE_HI) || s == FL_STOCK_MARK;
             if (FL_WRITE_OK(s, 0x1000u) != win || (win && (FL_PROTECTED(s, 0x1000u) || s < FL_APP_HI)))
                 ok = 0;
         }
@@ -158,7 +158,10 @@ static void spans(void)
     CHECK(fl_write(0xBFF00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* the staging -> BTIF */
     CHECK(fl_write(0xC1F00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* USRTRIM -> the store */
     CHECK(fl_write(0x9CF00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* the app area -> XDATA0 */
-    CHECK(fl_write(0xEDF00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* past the settings */
+    reset();
+    CHECK(fl_write(0xEDF00u, RAM(0x1C10000u), 0x200u) == 0 && calls == 2);    /* the settings -> FL_FREE */
+    reset();
+    CHECK(fl_write(0xF3F00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* FL_FREE -> USR */
 #endif
 }
 
@@ -208,7 +211,7 @@ static void wrappers(void)
 #elif TEST_LAYOUT == 3
     off = 0x1000F0u; limit = FM1_FLASH_SIZE;
 #elif TEST_LAYOUT == 5
-    off = FL_DATA_LO + 0xF0u; limit = FL_GLOB_HI;   /* the SMK's store, up to the settings' end */
+    off = FL_DATA_LO + 0xF0u; limit = FL_FREE_HI;   /* the SMK's store, up to FL_FREE's end (USR) */
 #else
     reset();
     CHECK(fl_write(0x98000u, RAM(0x1C10000u), 1u) == FL_ERR_RANGE);

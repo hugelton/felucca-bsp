@@ -45,3 +45,7 @@ grep -q "include it before any chip flash header" "$OUT/error" || { cat "$OUT/er
 printf '#include "fm1_flash.h"\n#include "fm1_clock.h"\n' | \
     "$CC" -I"$ROOT/boards/smk37" -I"$ROOT/chip" -x c -E -o "$OUT/pp.i" -     # (the right order: through)
 echo 'flash configuration rejection checks passed'
+# a board's own map under the policy (FL_BOARD_MAP): the SMK-37's windows, its protected ranges, the loader's window
+"$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -O2 $SANITIZE -I"$ROOT/boards/smk37" -I"$ROOT/chip" \
+    "$ROOT/tests/smk37_flash_map_test.c" -o "$OUT/smk37-map"
+"$OUT/smk37-map"
