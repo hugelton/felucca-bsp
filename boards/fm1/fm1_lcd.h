@@ -1,10 +1,13 @@
 /* SPDX-License-Identifier: MPL-2.0
- * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
+ * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
 /* FM-1 ST7789 panel: blocking, top-left origin, native RGB565 colours.
- * No framebuffer required; 480 bytes of shared RAM stage each pixel row.
+ * No framebuffer required; a 480-byte static row buffer stages each pixel row
+ * (a header static: each compilation unit that includes this gets its own).
  * Calls must be serialized (including against users of fm1_lcd_hw.h).
  * 0 = success (also empty rectangles), -1 = SPI timeout, -2 = bad bounds/buffer.
- * A timeout deselects and disables SPI; call fm1_lcd_init() before retrying.
+ * A timeout deselects and switches SPI1 off (fm1_lcd_spi_off; fm1_lcd_hw.h's own
+ * fm1_lcd_wait leaves it on); call fm1_lcd_init() before retrying.
  * See docs/BOARD_IO.md for ownership, lifetime and backlight details. */
 #pragma once
 #include <stdint.h>
@@ -15,6 +18,16 @@
 #define FM1_LCD_HEIGHT 240u
 static uint8_t fm1_lcd_row[FM1_LCD_WIDTH * 2u];
 
+/* the end of a transfer: wait, deselect; after a timeout, the SPI off until fm1_lcd_init */
+static int fm1_lcd_done(void)
+{
+    int rc = fm1_lcd_wait();
+    fm1_lcd_deselect();
+    if (rc)
+        fm1_lcd_spi_off();
+    return rc;
+}
+
 static int fm1_lcd_command(uint8_t cmd, const uint8_t *data, uint32_t n)
 {
     static uint8_t args[4];                    /* DMA reads RAM, not XIP constants */
@@ -23,16 +36,13 @@ static int fm1_lcd_command(uint8_t cmd, const uint8_t *data, uint32_t n)
     if (n > sizeof args || (n && !data))
         return -2;
     fm1_lcd_send_cmd(cmd);
-    rc = fm1_lcd_wait();
-    fm1_lcd_deselect();
+    rc = fm1_lcd_done();
     if (rc || !n)
         return rc;
     for (i = 0; i < n; i++)
         args[i] = data[i];
     fm1_lcd_send_data(args, n);
-    rc = fm1_lcd_wait();
-    fm1_lcd_deselect();
-    return rc;
+    return fm1_lcd_done();
 }
 
 static int fm1_lcd_init(void)
@@ -72,11 +82,8 @@ static int fm1_lcd_window(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 
 static int fm1_lcd_row_send(uint32_t w)
 {
-    int rc;
     fm1_lcd_send_data(fm1_lcd_row, w * 2u);
-    rc = fm1_lcd_wait();
-    fm1_lcd_deselect();
-    return rc;
+    return fm1_lcd_done();
 }
 
 static int fm1_lcd_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t rgb)

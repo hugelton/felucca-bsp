@@ -35,15 +35,21 @@ int main(void)
     assert(!(pc_out & FM1_LCD_CS) && (pc_out & FM1_LCD_DC));
     assert(spi[3] == (uint32_t)(uintptr_t)pixels && spi[4] == sizeof pixels);
     spi[0] &= ~0x8000u;
-    assert(fm1_lcd_wait() == -1 && fm1_lcd_timeouts == 1 && !(spi[0] & 1));
+    spi[0] |= 1u;
+    assert(fm1_lcd_wait() == -1 && fm1_lcd_timeouts == 1 && (spi[0] & 1u)); /* counted; SPI stays on */
+    assert(spi[0] & 0x4000u); /* pending cleared either way */
     fm1_lcd_deselect();
     assert(pc_out & FM1_LCD_CS);
+    spi[0] |= 0x8000u;
+    assert(fm1_lcd_wait() == 0 && fm1_lcd_timeouts == 1); /* a caller that inits once keeps drawing */
+    fm1_lcd_spi_off();
+    assert(!(spi[0] & 1u));
     fm1_lcd_hw_init();
     assert(spi[0] & 1u); /* reinit recovers the disabled controller */
     fm1_lcd_backlight(0);
     assert(pa_out & FM1_LCD_BL);
     fm1_lcd_backlight(1);
     assert(!(pa_out & FM1_LCD_BL));
-    puts("LCD transport: pins, DMA address/count, timeout disable and recovery checks passed");
+    puts("LCD transport: pins, DMA address/count, timeout, SPI off and recovery checks passed");
     return 0;
 }

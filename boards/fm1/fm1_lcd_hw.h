@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MPL-2.0
- * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
+ * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio): the transport's status, register hook */
 /* FM-1 LCD wiring: SPI1 on PC9 CLK, PC10 DO, PC7 CS,
  * PC8 D/C; backlight PA2, active low. Panel protocol: fm1_lcd.h.
  *
@@ -7,7 +8,8 @@
  *   fm1_lcd_baud(b)            SPI1 clock = lsb / (b + 1)
  *   fm1_lcd_send_cmd(c)        D/C low, CS low, one byte (then fm1_lcd_wait)
  *   fm1_lcd_send_data(p, n)    D/C high, CS low, DMA n bytes from RAM p
- *   fm1_lcd_wait()             0 done, -1 timeout (counted; SPI disabled until hw_init)
+ *   fm1_lcd_wait()             0 done, -1 timeout (counted); pending cleared, the SPI left on either way
+ *   fm1_lcd_spi_off()          SPI1 off (fm1_lcd.h after a timeout; fm1_lcd_hw_init turns it on again)
  *   fm1_lcd_deselect()         CS high
  *   fm1_lcd_backlight(on)      PA2 low (on) / high (off); the TIMER5 scan writes port A too: IRQs off around it
  */
@@ -58,19 +60,23 @@ FM1_INLINE void fm1_lcd_backlight(uint32_t on)
 
 FM1_INLINE void fm1_lcd_baud(uint32_t b) { FM1_LCD_SPI_BAUD = b; }
 
+/* A timeout is counted and reported, and the SPI stays on: callers that init once and ignore the result (fm1-base's
+ * device/lcd.c, loader/ldr_screen.c) go on drawing, as before. Switching it off is fm1_lcd.h's, which re-inits. */
 static int fm1_lcd_wait(void)
 {
     uint32_t n;
+    int rc = 0;
     for (n = 0; n < 4000000u && !(FM1_LCD_SPI_CON & 0x8000u); n++)
         ;
     if (n == 4000000u) {
         fm1_lcd_timeouts++;
-        FM1_LCD_SPI_CON &= ~1u;
-        return -1;
+        rc = -1;
     }
     FM1_LCD_SPI_CON |= 0x4000u;
-    return 0;
+    return rc;
 }
+
+FM1_INLINE void fm1_lcd_spi_off(void) { FM1_LCD_SPI_CON &= ~1u; }
 
 FM1_INLINE void fm1_lcd_deselect(void) { FM1_LCD_PC_OUT |= FM1_LCD_CS; }
 

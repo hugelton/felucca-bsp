@@ -9,7 +9,7 @@
 
 struct event { uint32_t n; uint8_t data[480]; };
 static struct event events[1024];
-static uint32_t count, waits, selects, deselects, init_calls, baud, delay_ms, fail_wait;
+static uint32_t count, waits, selects, deselects, init_calls, baud, delay_ms, fail_wait, spi_offs;
 static int selected;
 static void record(const void *data, uint32_t n)
 {
@@ -23,6 +23,7 @@ static void command(uint8_t c) { record(&c, 1); }
 static int wait_done(void) { return ++waits == fail_wait ? -1 : 0; }
 static void deselect(void) { assert(selected); selected = 0; deselects++; }
 static void init(void) { init_calls++; }
+static void spi_off(void) { assert(!selected); spi_offs++; }
 static void set_baud(uint32_t b) { baud = b; }
 static void delay(uint32_t ms) { delay_ms += ms; }
 #define fm1_lcd_send_cmd command
@@ -30,13 +31,14 @@ static void delay(uint32_t ms) { delay_ms += ms; }
 #define fm1_lcd_wait wait_done
 #define fm1_lcd_deselect deselect
 #define fm1_lcd_hw_init init
+#define fm1_lcd_spi_off spi_off
 #define fm1_lcd_baud set_baud
 #define fm1_delay_ms delay
 #include "fm1_lcd.h"
 
 static void reset(void)
 {
-    count = waits = selects = deselects = fail_wait = 0;
+    count = waits = selects = deselects = fail_wait = spi_offs = 0;
     selected = 0;
 }
 static void expect(uint32_t at, const uint8_t *bytes, uint32_t n)
@@ -87,12 +89,12 @@ int main(void)
     for (i = 1; i <= 7; i++) {
         reset(); fail_wait = i;
         assert(fm1_lcd_blit(0, 0, 2, 2, pixels, 4) == -1);
-        assert(count == i && !selected && selects == deselects);
+        assert(count == i && !selected && selects == deselects && spi_offs == 1); /* SPI off after the timeout */
     }
     for (i = 1; i <= 9; i++) {
         reset(); fail_wait = i;
         assert(fm1_lcd_init() == -1);
-        assert(count == i && !selected);
+        assert(count == i && !selected && spi_offs == 1);
     }
     puts("LCD: init, bounds, RGB565 wire bytes, full frame and timeout checks passed");
     return 0;

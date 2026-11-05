@@ -22,14 +22,17 @@ The original `fm1_lcd_hw.h` transport remains available for existing users.
   Nonempty rectangles must fit completely inside the display. Overflowing
   coordinates, out-of-bounds rectangles, null pixel pointers and short sources
   return `-2` before a transfer starts.
-- Both calls block until completion. They stage one row in 480 bytes of internal
-  RAM, sending the high byte first. The source may be in RAM or XIP and may be
+- Both calls block until completion. They stage one row in a 480-byte static
+  buffer (a header static: one per translation unit that includes `fm1_lcd.h`), sending the high byte first. The source may be in RAM or XIP and may be
   reused when the call returns. Normal C pointer validity/alignment and the
   supplied source capacity are the caller's responsibility.
 - `0` means success. A transport timeout returns `-1`, increments the existing
-  `fm1_lcd_timeouts`, disables SPI and releases CS. Reinitialize before retrying;
-  the panel may contain a partial rectangle. `fm1_lcd_wait()` in the low-level
-  transport now returns this status too; existing callers can still ignore it.
+  `fm1_lcd_timeouts`, releases CS and switches SPI1 off (`fm1_lcd_spi_off()`).
+  Reinitialize before retrying; the panel may contain a partial rectangle.
+  `fm1_lcd_wait()` in the low-level transport now returns this status too, but
+  leaves SPI1 on: existing callers that initialize once and ignore the result
+  (fm1-base's `device/lcd.c`, `loader/ldr_screen.c`) keep drawing after a
+  timeout, as before.
 
 Calls share staging RAM and SPI1. Do not call from nested interrupts or another
 core while a transfer is active, or mix raw transport calls with panel operations
