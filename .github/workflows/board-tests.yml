@@ -1,0 +1,15 @@
+name: Board tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Panel driver, LCD transport, checked audio start (Linux maps the DMA buffer)
+        env:
+          CC: clang
+        run: tests/run_board_tests.sh

@@ -1,0 +1,19 @@
+name: Flash driver tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  flash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Erase/program completion model
+        env:
+          CC: clang
+        run: tests/run_flash_wait_test.sh
+      - name: Write regions, the access gate and the wrappers
+        env:
+          CC: clang
+        run: tests/run_flash_tests.sh
