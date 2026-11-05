@@ -35,4 +35,13 @@ for config in '-DFM1_FLASH_SIZE=0x2000000u' '-DFM1_FLASH_SIZE=0x80000u' \
         exit 1
     fi
 done
+# a board's map after the chip's (chip/fm1_clock.h includes the chip's fm1_flash.h by name): the build stops
+if printf '#include "fm1_clock.h"\n#include "fm1_flash.h"\n' | \
+    "$CC" -I"$ROOT/boards/smk37" -I"$ROOT/chip" -x c -E -o "$OUT/pp.i" - 2>"$OUT/error"; then
+    echo "FAIL: accepted the SMK-37's map after the chip's" >&2
+    exit 1
+fi
+grep -q "include it before any chip flash header" "$OUT/error" || { cat "$OUT/error" >&2; exit 1; }
+printf '#include "fm1_flash.h"\n#include "fm1_clock.h"\n' | \
+    "$CC" -I"$ROOT/boards/smk37" -I"$ROOT/chip" -x c -E -o "$OUT/pp.i" -     # (the right order: through)
 echo 'flash configuration rejection checks passed'
