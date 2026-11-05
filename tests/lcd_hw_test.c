@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: MPL-2.0 */
+/* SPDX-License-Identifier: MPL-2.0
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>

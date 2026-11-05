@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: MPL-2.0 */
+/* SPDX-License-Identifier: MPL-2.0
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
 /* Compile-only target fixture: hwtest intentionally doesn't enable audio. */
 #include "fm1_audio.h"
 #include "fm1_lcd.h"
