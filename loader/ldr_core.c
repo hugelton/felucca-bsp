@@ -167,6 +167,10 @@ static int ldr_head(uint8_t *hdr, uint8_t *b, uint32_t *fl_off, uint32_t *fl_siz
     /* 1. UFW header + entry list (ota.c; it leaves the entries decoded in hdr) */
     if ((rc = ota_ufw(hdr, fl_off, fl_size, &ota_off, &ota_len)) != 0)
         return rc;
+#if LDR_LAYOUT
+    if (*fl_off && *fl_size != LDR_APP_HI)
+        return -15;                                      /* 2a. not this board's app area (an FM-1 package: 0x93000) */
+#endif
     if (!*fl_off || *fl_size < LDR_APP_HI || *fl_size > LDR_FL_MAX)
         return -3;
     for (i = 0; i < ota_rd16(hdr + 8); i++)
@@ -181,11 +185,9 @@ static int ldr_head(uint8_t *hdr, uint8_t *b, uint32_t *fl_off, uint32_t *fl_siz
     if (ota_crc16(b + 2, 30, 0) != ota_rd16(b))
         return -6;                                       /* package for another chip key */
 #if LDR_LAYOUT
-    /* 2a. laid out for this board? flash.bin's size is the board's app area with its head; app.bin's entry (at
-     * 0x20 of the app area, its size at +8) is the board's slot; the VM descriptor sits where the board's does.
+    /* 2a. laid out for this board? flash.bin's size is the board's app area with its head (above); app.bin's entry
+     * (at 0x20 of the app area, its size at +8) is the board's slot; the VM descriptor sits where the board's does.
      * Both installs take this (the classic and the fast), so nothing is erased for another board's package */
-    if (*fl_size != LDR_APP_HI)
-        return -15;
     if (ota_read(*fl_off + LDR_APP_LO, b, 0x100u))
         return -5;
     ldr_sfc(b, 0x100u, 0, *key);
