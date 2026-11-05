@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MPL-2.0
- * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
+ * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio): checked start, stop/restart, the sample and rate contract */
 /* FM-1 audio out: ALNK0 I2S -> external codec, double-buffered DMA
  * Fixed format: stereo L,R interleaved, signed Q23 in int32_t (sign-extended
  * low 24 bits, NOT shifted left by 8). Silence = 0, range -8388608..8388607.
@@ -9,7 +10,8 @@
  *
  *   fm1_audio_init_checked(buf, buffer_words, half_words, rate, isr, prio)
  *                         validates capacity, RAM range, alignment and clock;
- *                         returns 0 or FM1_AUDIO_ERR_*. IRQs must be off.
+ *                         returns 0 or FM1_AUDIO_ERR_* (warn_unused_result:
+ *                         a refused start is silence). IRQs must be off.
  *   fm1_audio_init(buf, half_words, isr, prio) compatibility wrapper, assumes
  *                         capacity >= 2 * half_words; now returns status too.
  *                         isr = asm wrapper (fm1_isr.S) for FM1_IRQ_ALNK0
@@ -42,6 +44,11 @@
 #define FM1_IOMAP_CON5 FM1_AUDIO_REG(uint32_t, 0x51030u)
 #define FM1_AUDIO_PLL_CON0 FM1_AUDIO_REG(uint32_t, 0x119A0u)
 #define FM1_AUDIO_PLL_CON1 FM1_AUDIO_REG(uint32_t, 0x119A4u)
+/* the stock audio PLL (PLL0), as M-VAVE's firmware and m-bootloader leave it running; CON1 compared under
+ * 0x07FFFFFF, as fm1_clock.h's fm1_clock_is_stock compares PLL1's CON1 (its top bits need not read back the same) */
+#define FM1_AUDIO_PLL_STOCK0 0x45400203u
+#define FM1_AUDIO_PLL_STOCK1 0x3F503026u
+#define FM1_AUDIO_PLL_CON1_MASK 0x07FFFFFFu
 #define FM1_AUDIO_HALF 0x80u      /* CON2 pending: a half buffer is free */
 #define FM1_AUDIO_RATE 44100u     /* nominal API rate; physical ratio below */
 #define FM1_AUDIO_RATE_NUM 24000000u
@@ -76,6 +83,7 @@ static void fm1__pc_out(uint32_t bit, int v)   /* PC0 MCLK, PC1 BCLK, PC2 LRCK, 
     FM1_PR(FM1_PC, FM1_DIR) &= ~m;
 }
 
+__attribute__((warn_unused_result))
 FM1_INLINE int fm1_audio_init_checked(int32_t *buf, uint32_t buffer_words, uint32_t half_words,
                                      uint32_t rate, void (*isr)(void), uint32_t prio)
 {
@@ -86,7 +94,8 @@ FM1_INLINE int fm1_audio_init_checked(int32_t *buf, uint32_t buffer_words, uint3
     if (FM1_ALNK_CON0 & 0x800u) return FM1_AUDIO_ERR_BUSY;
     /* Recognized stock audio PLL under M-VAVE and m-bootloader; never retune
      * a shared PLL here. Unknown configurations cannot promise this rate. */
-    if (FM1_AUDIO_PLL_CON0 != 0x45400203u || FM1_AUDIO_PLL_CON1 != 0x3F503026u)
+    if (FM1_AUDIO_PLL_CON0 != FM1_AUDIO_PLL_STOCK0 ||
+        (FM1_AUDIO_PLL_CON1 & FM1_AUDIO_PLL_CON1_MASK) != (FM1_AUDIO_PLL_STOCK1 & FM1_AUDIO_PLL_CON1_MASK))
         return FM1_AUDIO_ERR_CLOCK;
     fm1_irq_mask(FM1_IRQ_ALNK0);
     for (i = 0; i < 2u * half_words; i++)

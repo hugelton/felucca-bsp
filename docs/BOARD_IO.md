@@ -63,8 +63,10 @@ only when a protocol explicitly requires that advertised rate.
 This fixed-divider ratio was corroborated by prior FM-1 DMA-event measurements
 against TIMER4 and USB frame timing; it is not a new physical measurement in
 this change. The driver's fixed ALNK settings are preserved. Startup now rejects
-unrecognized audio PLL register values (`0x119A0 != 0x45400203` or
-`0x119A4 != 0x3F503026`) instead of promising a rate under an unknown clock.
+unrecognized audio PLL register values (`0x119A0 != 0x45400203`, or
+`0x119A4 & 0x07FFFFFF != 0x07503026`: its top bits are not compared, as
+`fm1_clock_is_stock()` does not compare PLL1's) instead of promising a rate
+under an unknown clock.
 It configures the 44.1-family selector/dividers without retuning the shared PLL
 or changing the CPU clock. Keep those PLL and ALNK clock settings unchanged
 while running. Exact 44,100 Hz and 48 kHz are not supported contracts here.
@@ -117,7 +119,11 @@ The four-argument `fm1_audio_init(buf, half_words, isr, prio)` remains available
 and now returns status. It assumes capacity of at least `2 * half_words` words
 and uses `FM1_AUDIO_RATE`; it cannot detect a short allocation. Migrate to the
 checked API and inspect the return value, including when an old caller previously
-ignored the `void` result. Code storing the old function type must update it.
+ignored the `void` result: a refused start leaves the FM-1 silent, with nothing
+logged. `fm1_audio_init_checked` is declared `warn_unused_result`, so a caller
+that drops its status gets a warning; the four-argument wrapper is not, so that
+existing callers still build with `-Werror`. Code storing the old function type
+must update it.
 
 ### Refill, stop/restart and underruns
 

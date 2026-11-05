@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: MPL-2.0 */
+/* SPDX-License-Identifier: MPL-2.0
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
 /* Real audio driver, fake MMIO/IRQs; Linux maps a DMA buffer in FM-1 SRAM's
  * address range so successful startup uses the same validation as the target. */
 #include <assert.h>
@@ -98,6 +99,8 @@ static void validate(void)
     reset(); pll1 ^= 1u;
     assert(fm1_audio_init(ptr(0x1C00000), 2, isr, 3) == FM1_AUDIO_ERR_CLOCK);
     assert(masks == 0 && attaches == 0 && delays == 0 && !regs[0]);
+    reset(); pll1 ^= 0x04000000u;              /* a bit under the mask: still unknown */
+    assert(fm1_audio_init(ptr(0x1C00000), 2, isr, 3) == FM1_AUDIO_ERR_CLOCK);
 }
 int main(void)
 {
@@ -141,6 +144,9 @@ int main(void)
     assert(samples[0] == FM1_AUDIO_SAMPLE_MAX && samples[128] == 77);
     for (i = 64; i < 128; i++) assert(samples[i] == 0);
     assert(fm1_audio_free_half() == 1 && attaches == 2);
+    fm1_audio_stop();
+    reset(); pll1 ^= 0xF8000000u;              /* PLL0 CON1's top bits, outside the mask: not compared */
+    assert(fm1_audio_init_checked(samples, 256, 128, 44100, isr, 3) == FM1_AUDIO_OK);
     fm1_audio_stop();
     assert(munmap(samples, 4096) == 0);
     puts("Audio: buffer/rate/clock rejection, startup, IRQs and stop/restart checks passed");
