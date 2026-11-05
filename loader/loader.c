@@ -110,6 +110,9 @@ void ldr_cstart(void)
     uint32_t *p;
     ldr_record_clear();                             /* first thing: a crash below cannot loop through a
                                                      * warm reset; resume after power loss uses the flash record */
+    FM1_FLASH_ICFG_WRITE(FM1_FLASH_ICFG_READ() & ~0x100u);   /* crt0_ldr.S's cli cleared bit 9; bit 8 too, whatever
+                                                     * the SPL left: the flash gate (fm1_flash_access.h) and the
+                                                     * loader's direct fl_*_ram calls, interrupts off throughout */
     fm1_cpu1_stop();                                /* also cover direct SPL/ROM entry */
     for (p = _bss_start; p < _bss_end; p++)
         *p = 0;
