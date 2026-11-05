@@ -30,8 +30,10 @@
  *                                 rebuilds the stock mapping (as Melodee does). Never written otherwise
  *   FL_GLOB     0xEB000-0xEDFFF   the settings pair (Felucca's superblock / globals; the FM-1's is 0xFC000, inside
  *                                 USR here). 0xEE000-0xF3FFF stays free
- * The update records (4 KiB boundary - 256, bsp/loader/ldr_core.c) are looked for from 0x9D000 up to 0xF4000,
- * outside the store and the protected windows; the reference port stages its own at 0xBB000-0xBFFFF too.
+ * The update records (4 KiB boundary - 256, bsp/loader/ldr_core.c) are looked for only in the stock VM, 0x9D000 up to
+ * BTIF at 0xC0000, as the reference port does, which stages its own at 0xBB000-0xBFFFF too.
+ *   FL_OWNER    0xAF000           who owns the store: "SMK37DATA" + a firmware family, the same sector in every
+ *                                 port, so no firmware parses another's data. Not ours: the windows are cleared first
  *
  * USRTRIM (0xC1000, read only; the stock firmware writes defaults when its marker is wrong or a curve does not
  * rise): +0x008 the 16 pad curves (5 x u16 each), +0x0A8 the 37 key velocity curves (5 x u16 each), +0x21A the
@@ -79,7 +81,8 @@
 #define FL_GLOB_LO      0x000EB000u
 #define FL_GLOB_HI      0x000EE000u
 #define FL_REC_LO       0x0009D000u                   /* where update records may lie (the loader clears them) */
-#define FL_REC_HI       0x000F4000u
+#define FL_REC_HI       0x000C0000u
+#define FL_OWNER        0x000AF000u                   /* the store's owner tag, inside FL_XDATA1 */
 /* the flash gate (chip/fm1_flash_policy.h): the unencrypted XIP window starts where the app area ends (fm1_input.h
  * reads USRTRIM through it); the part and the XIP map are the chip's 1 MiB */
 #define FM1_FLASH_PLAIN_LO FL_APP_HI
@@ -132,6 +135,7 @@ _Static_assert(FL__APART(FL_XDATA0_LO, FL_XDATA0_HI, FL_XDATA1_LO, FL_XDATA1_HI)
                FL__APART(FL_XDATA1_LO, FL_XDATA1_HI, FL_DATA_LO, FL_DATA_HI) &&
                FL__APART(FL_OTA_LO, FL_OTA_HI, FL_GLOB_LO, FL_GLOB_HI), "two windows overlap");
 _Static_assert(FL_OTA_HI - FL_OTA_LO == 5u * FL_SECTOR, "the update's staging is 5 sectors (chip/ota.c)");
+_Static_assert(FL_OWNER >= FL_XDATA1_LO && FL_OWNER + FL_SECTOR <= FL_XDATA1_HI, "the owner tag sits in FL_XDATA1");
 _Static_assert(FL_AUTO_HI == FL_XDATA1_LO, "the autosave pair sits just under FL_XDATA1 (plat.h PLAT_XDATA1 spans both)");
 _Static_assert(FL_USRTRIM >= FL_PROT1_LO && FL_TRIM_MARK + 8u <= FL_PROT1_HI, "USRTRIM is inside its protected window");
 _Static_assert(FL_REC_LO >= FL_APP_HI && FL_REC_HI <= FL_PROT2_LO, "update records: above the app area, below USR");

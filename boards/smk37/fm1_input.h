@@ -30,9 +30,9 @@
  * Timing: a tick shifts the next column's word (4 bytes by SPI2 DMA, ~3 us), latches it, starts one conversion,
  * then handles the column just read; nothing waits on the converter (taken next tick). The velocity's clock is
  * the tick (100 us = the stock's unit).
- * Keys: a key sounds when its second contact closes (note on, velocity from the ticks since the first closed; a
- * first contact never seen gives FM1_VEL_DEFAULT), and stops when its first contact has been open for
- * FM1_KEY_RELEASE samples in a row. No debounce on the way down beyond that (the matrix has diodes).
+ * Keys: once a frame (fm1__keys): a key sounds when its second contact closes, its velocity from the ticks since the
+ * first closed; stops when both have been open FM1_KEY_RELEASE frames; struck again before a full lift it restarts.
+ * The keys, buttons and scan order follow the reference port (Melodee's SMK-37 build, run on an Elite).
  * Buttons: the FM-1's asymmetric debounce (FM1_DEB_PRESS frames closed, FM1_DEB_RELEASE open).
  * Encoders: the FM-1's decoder (the stock tables 0x2814/0x4182, detents, a two-state jump forgiven).
  * LEDs: fm1_led[g] (bit = line of group g) lit on every column of the group's frame; fm1_led_dim[g] on one column
@@ -44,7 +44,7 @@
  * for two samples.
  * Wheels and pedal: raw readings; the rest level of each is its first reading after init (the device layer
  * scales the pitch wheel around it and takes the pedal as down when the jack's reading leaves its rest level
- * by FM1_PEDAL_SWING either way: a normally-open or a normally-closed pedal).
+ * by a margin either way: a normally-open or a normally-closed pedal).
  *
  * Board facts: M. Geisler's analysis of the stock v016 firmware (fm1-to-smk37 docs/01-hardware.md §5-6: the
  * pins, the word layout, the rows, the key, button, encoder and LED tables and the mux tables are marked
@@ -81,9 +81,9 @@
 #define FM1_NKEY FM1_NBTN                 /* (the FM-1's id space, 0..13 buttons then keys: buttons only here) */
 #define FM1_KEY_FM1_FIRST 5u              /* key 5 = F3: fm1_in.notes bit 0 */
 #define FM1_DEB_PRESS 2u                  /* buttons: frames closed in a row (a frame = 16 ticks, 1.6 ms) */
-#define FM1_DEB_RELEASE 6u                /* frames open in a row (~9.6 ms) */
-#define FM1_KEY_RELEASE 3u                /* keys: first-contact samples open in a row (~4.8 ms) */
-#define FM1_VEL_DEFAULT 100u              /* a key whose first contact was never seen closed */
+#define FM1_DEB_RELEASE 4u                /* frames open in a row (~6.4 ms) */
+#define FM1_KEY_RELEASE 3u                /* keys: frames with both contacts open (~4.8 ms) */
+#define FM1_KEY_RETRIG 1u                 /* frames the second contact stays open before closing again is a new strike */
 #define FM1_SETTLE_US 10u                 /* the polled scan: the rows after a latch */
 #define FM1_REST_FRAMES 600u              /* ~1 s still off the detent state: that is the detent (power-on) */
 #define FM1_ENC_GO 14u                    /* a 2-state jump from the detent goes the way of a click this recent */
@@ -91,7 +91,6 @@
 #define FM1_PAD_HIT 24u                   /* a hit: this much over the baseline */
 #define FM1_PAD_REL 12u                   /* released: under base + this for two samples */
 #define FM1_PAD_PEAK_N 3u                 /* the samples whose peak is the velocity */
-#define FM1_PEDAL_SWING 256u              /* the jack's reading this far from its rest: the pedal is down */
 #define FM1_LED_DIM_COLS 1u               /* a dim LED: lit on this many of the group's 16 columns */
 #define FM1_LED_MID_COLS 2u
 #define FM1_LED_BREATH_FRAMES 512u        /* a breath: group frames dark -> peak -> dark (~1.6 s; a power of 2) */
@@ -158,21 +157,22 @@ static volatile struct {
     uint32_t notes_pressed;               /* note-key press edges since the last fm1_input_note_edges() */
     uint32_t keys37_lo, keys37_hi;        /* bit k = key k held (0 = C3 .. 36 = C6): keys 0..31, then 32..36 */
     uint32_t keys37_pressed_lo, keys37_pressed_hi;   /* press edges since the last fm1_input_key37_edges() */
+    uint32_t keys37_retrig_lo, keys37_retrig_hi;     /* struck again while down (their bit stays set) */
     uint8_t key_vel[FM1_NKEY37];          /* the last press's velocity, 1..127 */
     uint32_t pads;                        /* bit p = pad p down (0..7 the top row, 8..15 the bottom) */
     uint32_t pads_pressed;                /* press edges since the last fm1_input_pad_edges() */
     uint8_t pad_vel[FM1_NPAD];            /* the last hit's velocity, 1..127 */
     uint8_t pad_press[FM1_NPAD];          /* pressure while down, 0..127 */
-    uint16_t fader[4];                    /* 0..1023, smoothed */
-    uint16_t wheel[2];                    /* raw 0..1023: 0 pitch, 1 mod */
-    uint16_t wheel_rest[2];               /* their first readings (0xFFFF: none yet) */
-    uint16_t pedal_raw, pedal_rest;       /* the jack's reading and its rest level (0xFFFF: none yet) */
-    uint8_t pedal;                        /* 1 = down */
+    uint8_t fader[4];                     /* 0..127: a median of three, smoothed, a dead band of one */
+    uint16_t fad_acc[4], fad_hist[4][2];  /* .. x16 smoothed; the two readings before */
+    uint16_t wheel[2];                    /* raw 0..1023, smoothed: 0 pitch, 1 mod (the device layer scales them) */
+    uint16_t pedal_raw;                   /* the jack's reading (the device layer learns its rest) */
     uint16_t battery;                     /* raw 0..1023 (0: none yet) */
     uint8_t raw[FM1_NCOL];                /* last frame, packed rows (bit r = row r), 1 = closed */
     uint8_t cnt[FM1_NBTN];                /* frames in a row against the debounced state */
-    uint8_t kst[FM1_NKEY37], kcnt[FM1_NKEY37];   /* a key: 0 up, 1 first contact closed, 2 sounding; opens seen */
-    uint32_t kt0[FM1_NKEY37];             /* the tick its first contact closed */
+    uint8_t kst[FM1_NKEY37], kcnt[FM1_NKEY37];   /* a key's contacts settled (0, 1, 3); frames with both open */
+    uint8_t kopen[FM1_NKEY37];            /* frames the second has been open with the note on (saturates) */
+    uint32_t kt0[FM1_NKEY37];             /* the tick the first closed, or the second opened with the note on */
     uint8_t enc_prev[FM1_NENC], enc_last[FM1_NENC];
     uint8_t enc_rest[FM1_NENC];           /* the detent state (0..3) */
     uint16_t enc_still[FM1_NENC];         /* frames since the last state change */
@@ -190,6 +190,7 @@ static uint16_t fm1_led_dim[2];           /* the glow */
 static uint16_t fm1_led_mid[2];           /* a steady mid level */
 static uint16_t fm1_led_breath[2];        /* breathing, in step */
 static uint16_t fm1_curve_key[FM1_NKEY37][5], fm1_curve_pad[FM1_NPAD][5];
+static uint8_t fm1_vel_mode;               /* keys and pads: 0 the curves as they are, 1 softer, 2 harder, 3 fixed at 100 */
 static volatile struct {
     uint16_t con;                         /* the conversion's clock / start delay (FM1_ADC_CON); 0 = analog off */
     uint8_t pend;                         /* a conversion runs for (mux, addr) */
@@ -310,7 +311,15 @@ static uint32_t fm1__curve(uint32_t x, const uint16_t *t)
         for (i = 1; x > t[i]; i++)
             ;
         v = (i - 1u) * 256u + (x - t[i - 1u]) * 256u / (uint32_t)(t[i] - t[i - 1u]);
+    if (v > 1023u)
+        v = 1023u;
     }
+    if (fm1_vel_mode == 3u)
+        return 100u;
+    if (fm1_vel_mode == 1u)
+        v = 1023u - (1023u - v) * (1023u - v) / 1023u;
+    else if (fm1_vel_mode == 2u)
+        v = v * v / 1023u;
     v >>= 3;
     return v ? v : 1u;
 }
@@ -336,7 +345,6 @@ static void fm1_input_init(void)
         fm1_in.enc_prev[i] = fm1_in.enc_last[i] = 0xFF;   /* seeded by the first frame */
     for (i = 0; i < FM1_NPAD; i++)
         fm1_in.pbase[i] = FM1_PAD_BASE0;
-    fm1_in.wheel_rest[0] = fm1_in.wheel_rest[1] = fm1_in.pedal_rest = 0xFFFFu;
     fm1__trim_load();
 }
 
@@ -358,10 +366,13 @@ static void fm1__btn(uint32_t id, uint32_t closed)   /* the FM-1's debounce */
     else
         fm1_in.released |= bit;
 }
+static inline int fm1__key_held(uint32_t k)
+{
+    return k < 32u ? (fm1_in.keys37_lo >> k) & 1u : (fm1_in.keys37_hi >> (k - 32u)) & 1u;
+}
 static void fm1__key_on(uint32_t k, uint32_t vel)
 {
     fm1_in.key_vel[k] = (uint8_t)vel;
-    fm1_in.kst[k] = 2;
     if (k < 32u) {
         fm1_in.keys37_lo |= 1u << k;
         fm1_in.keys37_pressed_lo |= 1u << k;
@@ -376,7 +387,6 @@ static void fm1__key_on(uint32_t k, uint32_t vel)
 }
 static void fm1__key_off(uint32_t k)
 {
-    fm1_in.kst[k] = 0;
     if (k < 32u)
         fm1_in.keys37_lo &= ~(1u << k);
     else
@@ -384,55 +394,71 @@ static void fm1__key_off(uint32_t k)
     if (k >= FM1_KEY_FM1_FIRST && k < FM1_KEY_FM1_FIRST + 27u)
         fm1_in.notes &= ~(1u << (k - FM1_KEY_FM1_FIRST));
 }
-static void fm1__key_c1(uint32_t k, uint32_t closed)   /* the first contact, sampled once a frame */
+/* a note starts, its velocity from the ticks since kt0 (the stock's 0.1 ms units, from 10); again: the key was struck
+ * again before a full lift, so its bit stays set and the app restarts the note (fm1_input_key37_retrig) */
+static void fm1__key_strike(uint32_t k, uint32_t again)
 {
-    if (closed) {
-        if (fm1_in.kst[k] == 0u) {
-            fm1_in.kst[k] = 1;
-            fm1_in.kt0[k] = fm1_in.ticks;
-        }
-        fm1_in.kcnt[k] = 0;
-        return;
+    uint32_t t = 10u + (fm1_in.ticks - fm1_in.kt0[k]), x = t <= 0x3FEu ? 0x3FFu - t : 1u;
+    if (again) {
+        if (k < 32u)
+            fm1_in.keys37_retrig_lo |= 1u << k;
+        else
+            fm1_in.keys37_retrig_hi |= 1u << (k - 32u);
     }
-    if (fm1_in.kst[k] == 0u)
-        return;
-    if (++fm1_in.kcnt[k] < FM1_KEY_RELEASE)
-        return;
-    fm1_in.kcnt[k] = 0;
-    fm1__key_off(k);
-}
-static void fm1__key_c2(uint32_t k, uint32_t closed)   /* the second: the note on, with the velocity */
-{
-    uint32_t t, x;
-    if (!closed || fm1_in.kst[k] == 2u)
-        return;
-    if (fm1_in.kst[k] == 0u) {                       /* the first contact never seen (dirty): a note anyway */
-        fm1__key_on(k, FM1_VEL_DEFAULT);
-        return;
-    }
-    t = 10u + (fm1_in.ticks - fm1_in.kt0[k]);        /* the stock's units: 0.1 ms, from 10 */
-    x = t > 1022u ? 1u : 1023u - t;
     fm1__key_on(k, fm1__curve(x, fm1_curve_key[k]));
 }
-static void fm1__keys(uint32_t p)                    /* the cells of column p, just read */
+/* The keys, once a frame, from a whole frame's rows. The two contacts settle as 0 open, 1 the first closed, 3 both; the
+ * second without the first counts as both, so a dirty first contact neither loses a note nor cuts one. A note ends
+ * when both are open for FM1_KEY_RELEASE frames. Second contact opening and closing again while the first holds is a
+ * new strike, timed from where it opened. */
+static void fm1__keys(void)
 {
-    uint32_t k, raw = fm1_in.raw[p];
+    uint32_t k;
     for (k = 0; k < FM1_NKEY37; k++) {
-        uint32_t c1 = FM1_KEY_C1[k], c2 = FM1_KEY_C2[k];
-        if ((c1 >> 4) == p)
-            fm1__key_c1(k, (raw >> (c1 & 15u)) & 1u);
-        if ((c2 >> 4) == p)
-            fm1__key_c2(k, (raw >> (c2 & 15u)) & 1u);
+        uint32_t c1 = FM1_KEY_C1[k], c2 = FM1_KEY_C2[k], st = fm1_in.kst[k];
+        uint32_t s = ((fm1_in.raw[c1 >> 4] >> (c1 & 15u)) & 1u) | ((fm1_in.raw[c2 >> 4] >> (c2 & 15u)) & 1u) << 1;
+        uint32_t on = (uint32_t)fm1__key_held(k);
+        if (s == 2u)
+            s = 3u;
+        if (s == 0u) {
+            if (st == 0u) {
+                fm1_in.kcnt[k] = 0;
+            } else if (++fm1_in.kcnt[k] >= FM1_KEY_RELEASE) {
+                fm1_in.kcnt[k] = 0;
+                fm1_in.kst[k] = 0;
+                if (on)
+                    fm1__key_off(k);
+            }
+            continue;
+        }
+        fm1_in.kcnt[k] = 0;
+        if (s == st) {
+            if (on && st == 1u && fm1_in.kopen[k] != 0xFFu)
+                fm1_in.kopen[k]++;
+            continue;
+        }
+        if (st == 0u)
+            fm1_in.kt0[k] = fm1_in.ticks;
+        if (s == 3u) {
+            if (!on)
+                fm1__key_strike(k, 0);
+            else if (st == 1u && fm1_in.kopen[k] >= FM1_KEY_RETRIG)
+                fm1__key_strike(k, 1);
+        } else if (st == 3u && on) {
+            fm1_in.kt0[k] = fm1_in.ticks;
+            fm1_in.kopen[k] = 0;
+        }
+        fm1_in.kst[k] = (uint8_t)s;
     }
     for (k = 0; k < FM1_NBTN; k++)
-        if ((FM1_BTN[k] >> 4) == p)
-            fm1__btn(k, (raw >> (FM1_BTN[k] & 15u)) & 1u);
+        fm1__btn(k, (fm1_in.raw[FM1_BTN[k] >> 4] >> (FM1_BTN[k] & 15u)) & 1u);
 }
 
 /* ---- once a frame: the encoders (the FM-1's decoder), the breath ---- */
 static void fm1__frame(void)
 {
     uint32_t e;
+    fm1__keys();
     for (e = 0; e < FM1_NENC; e++) {
         const uint8_t *m = FM1_ENC[e];
         uint32_t cur = ((fm1_in.raw[m[0]] >> m[1]) & 1u) << 1 | ((fm1_in.raw[m[2]] >> m[3]) & 1u);
@@ -515,16 +541,16 @@ static void fm1__pad_sample(uint32_t p, uint32_t v)
     uint32_t bit = 1u << p;
     switch (fm1_in.pst[p]) {
     case 0:
-        if (v >= fm1_in.pbase[p] + FM1_PAD_HIT) {
+        if (v > fm1_in.pbase[p] + FM1_PAD_HIT) {
             fm1_in.pst[p] = 1;
             fm1_in.ppeak[p] = (uint16_t)v;
             fm1_in.pn[p] = 1;
             return;
         }
-        if (v < fm1_in.pbase[p] && fm1_in.pbase[p] > 0u)
+        if (v < fm1_in.pbase[p])
             fm1_in.pbase[p]--;                        /* the baseline follows the rest reading down */
-        else if (v > fm1_in.pbase[p])
-            fm1_in.pbase[p] = (uint16_t)(fm1_in.pbase[p] + 2u);   /* and up (below the hit threshold: drift) */
+        else if (fm1_in.pbase[p] < fm1_curve_pad[p][0])
+            fm1_in.pbase[p] = (uint16_t)(fm1_in.pbase[p] + 2u);   /* and up, only as far as the curve's first point */
         return;
     case 1:
         if (v > fm1_in.ppeak[p])
@@ -558,21 +584,24 @@ static void fm1__an_result(uint32_t mux, uint32_t addr, uint32_t v)
     } else if (mux == 1u) {                          /* B: the bottom row (its line is the LED frame's clock pin) */
         if (!fm1_an.padled && !fm1_padled_on)
             fm1__pad_sample(8u + FM1_ADC_PAD_OF[addr], v);
-    } else if (addr < 4u) {                          /* C: the faders, smoothed a little */
-        uint32_t i = FM1_ADC_FADER_OF[addr], f = fm1_in.fader[i];
-        fm1_in.fader[i] = (uint16_t)(f + ((int32_t)v - (int32_t)f) / 2);
+    } else if (addr < 4u) {                          /* C: the faders: a lone spike dropped, smoothed, 0..127 */
+        uint32_t i = FM1_ADC_FADER_OF[addr], h0 = fm1_in.fad_hist[i][0], h1 = fm1_in.fad_hist[i][1], f = fm1_in.fader[i], m, n;
+        int32_t acc = fm1_in.fad_acc[i];
+        fm1_in.fad_hist[i][1] = (uint16_t)h0;
+        fm1_in.fad_hist[i][0] = (uint16_t)v;
+        m = v > h0 ? (h0 > h1 ? h0 : v > h1 ? h1 : v) : (v > h1 ? v : h0 > h1 ? h1 : h0);
+        acc += ((int32_t)m * 16 - acc) / 4;
+        fm1_in.fad_acc[i] = (uint16_t)acc;
+        n = (uint32_t)acc / 128u;
+        if (n > 127u)
+            n = 127u;
+        if (n > f + 1u || n + 1u < f || (n != f && (n == 0u || n == 127u)))
+            fm1_in.fader[i] = (uint8_t)n;
     } else if (addr == FM1_ADC_C_PITCH || addr == FM1_ADC_C_MOD) {
         uint32_t w = addr - FM1_ADC_C_PITCH;
-        fm1_in.wheel[w] = (uint16_t)v;
-        if (fm1_in.wheel_rest[w] == 0xFFFFu)
-            fm1_in.wheel_rest[w] = (uint16_t)v;
+        fm1_in.wheel[w] = (uint16_t)((int32_t)fm1_in.wheel[w] + ((int32_t)v - (int32_t)fm1_in.wheel[w]) / 4);
     } else if (addr == FM1_ADC_C_PEDAL) {
-        int32_t d;
         fm1_in.pedal_raw = (uint16_t)v;
-        if (fm1_in.pedal_rest == 0xFFFFu)
-            fm1_in.pedal_rest = (uint16_t)v;       /* the rest level at power-on: whichever pedal is plugged */
-        d = (int32_t)v - (int32_t)fm1_in.pedal_rest;
-        fm1_in.pedal = (uint8_t)(d > (int32_t)FM1_PEDAL_SWING || d < -(int32_t)FM1_PEDAL_SWING);
     } else {
         fm1_in.battery = (uint16_t)(v ? v : 1u);
     }
@@ -624,7 +653,6 @@ static void fm1_input_scan(void)                     /* one polled frame: keys a
         fm1__sr_shift(fm1__col_bits(n) | 0xFFFFu);
         fm1__sr_wait();
         fm1__wait(FM1_SETTLE_US);
-        fm1__keys(p);
         fm1_in.ticks++;
     }
     fm1__frame();
@@ -651,7 +679,6 @@ static void fm1_input_tick(void)
     /* (word 0 is latched just after the next frame's common changes: it carries that group's lines) */
     fm1__sr_shift(fm1__col_bits(n) | fm1__led_low16(n == 0u ? g ^ 1u : g, n, fm1__an_addr_after()));
     fm1__tick_col = (uint8_t)n;
-    fm1__keys(p);
     if (n == 0u)
         fm1__frame();
 }
@@ -693,6 +720,14 @@ static uint32_t fm1_input_note_edges(void)
     fm1_in.notes_pressed = 0;
     fm1__unlock(k);
     return p;
+}
+static void fm1_input_key37_retrig(uint32_t *lo, uint32_t *hi)  /* keys struck again while down, since the last call */
+{
+    uint32_t k = fm1__lock();
+    *lo = fm1_in.keys37_retrig_lo;
+    *hi = fm1_in.keys37_retrig_hi;
+    fm1_in.keys37_retrig_lo = fm1_in.keys37_retrig_hi = 0;
+    fm1__unlock(k);
 }
 static void fm1_input_key37_edges(uint32_t *lo, uint32_t *hi)   /* the 37 keys' press edges */
 {

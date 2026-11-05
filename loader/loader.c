@@ -26,17 +26,16 @@
 /* the loader may write the app area and clear update records (program over one, or erase its own staging); never
  * the head, nor Felucca's store [0x97000, 0xE0000) (user data, never a record: ldr_core.c) */
 #ifdef LDR_SMK37
-/* the SMK-37 (boards/smk37/fm1_flash.h, first on the include path): the app area [0x4000, 0x9D000) and the records
- * above it up to BTIF (0xC0000), and between the stock marker sector and USR; never BTIF, USRTRIM, USR, key_mac nor
- * the store [0xC2000, 0xEA000). Its staging (ota.c's OTA_AREA, the record at 0xBFF00) is the board's */
-#define FL_RANGE_OK(off, n) (FL_IN(off, n, FL_APP_LO, FL_PROT1_LO) || FL_IN(off, n, FL_STOCK_MARK, FL_PROT2_LO))
+/* the SMK-37 (boards/smk37/fm1_flash.h, first on the include path): the app area [0x4000, 0x9D000) and update
+ * records only in the stock VM above it, up to BTIF (0xC0000); never BTIF, USRTRIM, the store, USR nor key_mac.
+ * Its staging (ota.c's OTA_AREA, the record at 0xBFF00) is the board's */
+#define FL_RANGE_OK(off, n) FL_IN(off, n, FL_APP_LO, FL_REC_HI)
 #define OTA_AREA FL_OTA_LO
 #define LDR_APP_HI FL_APP_HI
 #define LDR_REC_LO FL_REC_LO
 #define LDR_REC_HI FL_REC_HI
 #define LDR_DATA_LO FL_DATA_LO
 #define LDR_DATA_HI FL_DATA_HI
-#define LDR_SKIP(lo) ((lo) >= FL_PROT1_LO && (lo) < FL_PROT1_HI)   /* BTIF and USRTRIM: never, record or not */
 #define LDR_LAYOUT 1                                /* refuse a package not laid out for the SMK before any erase */
 #define LDR_APP_SLOT 0x97FBCu                       /* app.bin's slot (fm1-base tools/fm1pkg_make.py: the FM-1's 0x8DFBC + 0xA000) */
 #define LDR_VM_OFF FL_APP_HI                        /* the package's VM descriptor: the stock SMK's settings store, 0x9D000 */
@@ -44,8 +43,12 @@
 #define FL_RANGE_OK(off, n) (FL_IN(off, n, 0x4000u, 0x97000u) || FL_IN(off, n, 0xE0000u, 0xFC000u))
 #endif
 #include "fm1_flash.h"
-#if defined(LDR_SMK37) && !defined(FL_BOARD_MAP)
+#ifdef LDR_SMK37
+#ifndef FL_BOARD_MAP
 #error "LDR_SMK37: build with -Iboards/smk37 before -Ichip (the board's fm1_flash.h)"
+#endif
+_Static_assert(FL_REC_LO == FL_APP_HI && FL_REC_HI == FL_PROT1_LO && FL_OTA_LO >= FL_REC_LO && FL_OTA_HI <= FL_REC_HI,
+               "the SMK's loader: records only between the app area and BTIF, its own staging among them");
 #endif
 #include "../chip/libc.c"
 #include "../chip/usb.c"

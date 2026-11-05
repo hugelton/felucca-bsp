@@ -10,7 +10,8 @@
  * the FM-1's LCD group). Between two LCD transfers the main loop switches SPI1 over for one frame:
  *   fm1_padled_send(p, n)      after lcd_sync (the LCD's DMA done, CS high): group B, the LED baud, DMA n bytes
  *                              from RAM p (one SPI byte per LED bit: 0xF0 a one, 0xC0 a zero, FM1_PADLED_BAUD
- *                              makes a byte ~1.2 us; the frame: 36 zero bytes of reset, then 16 x 24 bytes)
+ *                              makes a byte ~1.2 us; the frame: 250 zero bytes of reset, ~300 us, then 16 x 24 bytes:
+ *                              a shorter reset lets a glitch at the pin switch shift the chain by one LED)
  *   fm1_padled_done()          wait for it, then group A and the LCD's baud again; PC10 a low output between
  *                              frames (the latch time always met)
  * PC9 (group B's CLK) is mux B's analog line (fm1_adc.h): it is left an input, never driven; the reference port
@@ -53,8 +54,8 @@
 #define FM1_PADLED_DO (1u << 10)           /* PC10: the pad LEDs' data line (SPI1 DO in group B) */
 #define FM1_LCD_GROUP_B 0x10u              /* IOMAP_CON1 bit 4: SPI1 on PC9 / PC10 (set) or PB6 / PB7 (clear) */
 #define FM1_PADLED_BAUD 8u                 /* lsb / 9: ~6.67 MHz, one SPI byte (an LED bit) ~1.2 us */
-#define FM1_PADLED_RESET 36u               /* zero bytes before the 16 LEDs: the latch (~43 us low) */
-#define FM1_PADLED_FRAME (FM1_PADLED_RESET + 16u * 24u)   /* 420 bytes, ~0.5 ms */
+#define FM1_PADLED_RESET 250u              /* zero bytes before the 16 LEDs: the latch (~300 us low) */
+#define FM1_PADLED_FRAME (FM1_PADLED_RESET + 16u * 24u)   /* 634 bytes, ~0.8 ms */
 #define FM1_LCD_NO_BACKLIGHT 1
 
 static uint32_t fm1_lcd_timeouts;
@@ -123,8 +124,9 @@ FM1_INLINE void fm1_lcd_send_data(const void *p, uint32_t n)
 FM1_INLINE void fm1_padled_send(const void *p, uint32_t n)
 {
     fm1_padled_on = 1;
-    FM1_LCD_IOMAP_CON1 |= FM1_LCD_GROUP_B;
+    FM1_LCD_PC_OUT |= FM1_LCD_CS;              /* the panel ignores the bus */
     FM1_LCD_SPI_BAUD = FM1_PADLED_BAUD;
+    FM1_LCD_IOMAP_CON1 |= FM1_LCD_GROUP_B;
     FM1_LCD_SPI_CON |= 0x4000u;
     FM1_LCD_SPI_ADR = (uint32_t)(uintptr_t)p;
     FM1_LCD_SPI_CNT = n;
