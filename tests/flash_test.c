@@ -108,6 +108,24 @@ static void policy(void)
 #endif
 }
 
+/* a write across regions that touch: checked page by page before the first, as fl_prog_ram checks each page */
+static void spans(void)
+{
+#if TEST_LAYOUT == 0
+    reset();
+    CHECK(fl_write(0xE6F00u, RAM(0x1C10000u), 0x200u) == 0 && calls == 2);    /* AUTO -> XDATA1 at 0xE7000 */
+    CHECK(seen_off[0] == 0xE6F00u && seen_off[1] == 0xE7000u);
+    reset();
+    CHECK(fl_write(0x96F80u, RAM(0x1C10000u), 0x100u) == 0 && calls == 2);    /* XDATA0 -> store at 0x97000 */
+    reset();
+    CHECK(fl_write(0x92F00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* the app area: no page */
+    CHECK(fl_write(0xFEF00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* past the globals */
+#elif TEST_LAYOUT == 1
+    reset();
+    CHECK(fl_write(0x98F00u, RAM(0x1C10000u), 0x200u) == FL_ERR_RANGE && calls == 0);   /* a gap: no page */
+#endif
+}
+
 static void locking(void)
 {
     const uint32_t states[] = {0u, 0x100u, 0x200u, 0x300u, 0x5B5u, 0x4B5u, 0x7B5u, UINT32_MAX};
@@ -146,7 +164,7 @@ static void wrappers(void)
     uint32_t off, limit, state;
     int rc;
 #if TEST_LAYOUT == 0
-    off = 0x970F0u; limit = FL_DATA_HI;
+    off = 0x970F0u; limit = FL_GLOB_HI;           /* the defaults touch from 0x93000 up to the globals' end */
 #elif TEST_LAYOUT == 1
     off = 0x980F0u; limit = 0x99000u;
 #elif TEST_LAYOUT == 2
@@ -171,6 +189,8 @@ static void wrappers(void)
     CHECK(fl_write(off, RAM(0x2000000u), 1u) == FL_ERR_BUFFER);
     CHECK(calls == 0);
     CHECK(fl_write(off, RAM(0x1C10000u), 0u) == 0 && calls == 0);
+    CHECK(fl_write(off, 0, 0u) == 0 && fl_write(UINT32_MAX, 0, 0u) == 0 && calls == 0);   /* nothing: 0, as before */
+    CHECK(fl_read(off, 0, 0u) == 0 && calls == 0);
     reset(); cfg &= ~0x100u; state = cfg; fail_at = 2;
     CHECK(fl_write(off, RAM(0x1C10000u), 600) == FL_ERR_TIMEOUT);
     CHECK(calls == 2 && cfg == state); /* disabled stays disabled on failure */
@@ -217,7 +237,7 @@ static void wrappers(void)
 
 int main(void)
 {
-    policy(); locking(); wrappers();
+    policy(); locking(); wrappers(); spans();
     printf("flash layout %d (FM1_CPU1 %d): %u checks, %u failures\n", TEST_LAYOUT, FM1_CPU1, checks, fails);
     return fails != 0;
 }

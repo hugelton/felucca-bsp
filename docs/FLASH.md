@@ -17,7 +17,9 @@ Define configuration before the first inclusion of `fm1_flash.h` (or
 #include "fm1_flash.h"
 ```
 
-A write/erase must fit wholly within one region, even if two regions touch.
+An erase must fit wholly within one region. A write is checked page by page
+(each 256-byte page, or the part of it written, within one region), all before
+the first page is programmed, so a write may run across regions that touch.
 An empty `FM1_FLASH_WRITE_REGIONS(X)` allows reads only. Regions must be
 constant expressions: no partition table or callback may be fetched from XIP
 while it is disabled. The physical-capacity check always applies, including
@@ -68,8 +70,8 @@ shares the error-code space; use it as a success/failure check.
 
 The complete read/write range and buffer are checked before the first chunk.
 Invalid ranges, arithmetic wraparound and buffers outside on-chip RAM are
-rejected. A zero-length read/write is a no-op if its range and buffer are valid;
-no flash transaction occurs. A later hardware failure or CPU1 job can still stop
+rejected. A zero-length read/write returns `0` without checking its range or
+buffer (`fl_write(off, NULL, 0)` as before); no flash transaction occurs. A later hardware failure or CPU1 job can still stop
 a multi-page operation after earlier pages changed: these operations are not
 atomic storage transactions. Applications retain responsibility for journals,
 checksums and power-loss recovery of their own data.
@@ -84,15 +86,19 @@ necessary; sector erase can take hundreds of milliseconds.
 
 The driver rejects access before changing SFC or flash pins unless:
 
-- The caller is CPU0 with global interrupts masked.
-- CPU1 is held/off, or the BSP worker has acknowledged its RAM-only idle state.
+- The caller is CPU0 with global interrupts masked: ICFG bit 8 (`irq_save`, the
+  SDK's `local_irq_save`) or bit 9 (`cli`) clear, as the SDK's `cpu_irq_disabled`.
+- In a build with the second core (`FM1_CPU1`, defined before the first BSP
+  header): CPU1 is held/off, or the BSP worker has acknowledged its RAM-only idle
+  state. A build without it never starts CPU1 and does not check it.
 
 `fm1_cpu1_run()` revokes idle permission before publishing a job. The RAM worker
 publishes idle after the job's final barrier and before publishing completion,
 so a following dispatch cannot be overwritten by a late idle acknowledgement.
 A busy or unknown worker causes `FL_ERR_BUSY`; the driver neither aborts a job
 nor waits indefinitely. Arrange a job-free interval, then retry. The loader
-holds CPU1 at entry, including when entered directly through SPL/ROM.
+holds CPU1 and clears ICFG bit 8 at entry, including when entered directly
+through SPL/ROM.
 
 The BSP uses a single compilation unit. Include the flash driver, CPU1 worker
 and stop helper in that same unit so they share their access state. Custom CPU1

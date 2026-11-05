@@ -38,9 +38,18 @@ static int fl_erase4k(uint32_t off, uint32_t *took_us)
 
 static int fl_write(uint32_t off, const uint8_t *src_ram, uint32_t n)
 {
-    uint32_t took;
-    /* Validate the WHOLE request before the first page can change. */
-    if (!FL_WRITE_OK(off, n)) return FL_ERR_RANGE;
+    uint32_t took, o, left;
+    if (!n) return 0;                           /* nothing to write: 0, whatever off and src_ram are */
+    /* Validate the WHOLE request before the first page can change: inside the part, without wrapping, and every
+     * page inside a write region, as fl_prog_ram checks it. A write may run across regions that touch (the
+     * defaults' AUTO and XDATA1 at 0xE7000), as it could when each page was checked only as it was written. */
+    if (!FL_READ_OK(off, n)) return FL_ERR_RANGE;
+    for (o = off, left = n; left; ) {
+        uint32_t chunk = 256u - (o & 0xFFu);
+        if (chunk > left) chunk = left;
+        if (!FL_WRITE_OK(o, chunk)) return FL_ERR_RANGE;
+        o += chunk; left -= chunk;
+    }
     if (!FL_RAM_OK(src_ram, n)) return FL_ERR_BUFFER;
     while (n) {
         uint32_t chunk = 256u - (off & 0xFFu), f;
@@ -57,6 +66,7 @@ static int fl_write(uint32_t off, const uint8_t *src_ram, uint32_t n)
 
 static int fl_read(uint32_t off, uint8_t *dst_ram, uint32_t n)
 {
+    if (!n) return 0;                           /* as fl_write */
     if (!FL_READ_OK(off, n)) return FL_ERR_RANGE;
     if (!FL_RAM_OK(dst_ram, n)) return FL_ERR_BUFFER;
     while (n) {
