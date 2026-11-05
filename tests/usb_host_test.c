@@ -79,7 +79,7 @@ static void devices_init(void)
 }
 
 /* --------------------------------------------------- the SIE and bus --- */
-static uint8_t regs[5][32], common[16], index_reg, rsp[512];
+static uint8_t regs[5][32], common[16], index_reg, rsp[512];     /* EP0..EP4 (EP4: the audio stream) */
 static uint32_t rsp_len, rsp_pos, ep_cnt[5];
 static void *ep_radr[5];
 static void *ep_tadr[5];
@@ -202,6 +202,7 @@ static void deliver_rx(void)            /* an IN request is pending on EP1 and t
     d = by_addr(common[0]);
     if (!d || d != &dev[KBD] || rx_head == rx_tail)
         return;
+    assert(ep_radr[1]);                                 /* the host code gave EP1 its buffer */
     memcpy(ep_radr[1], rx_q[rx_tail % 8], rx_n[rx_tail % 8]);
     regs[1][22] = rx_n[rx_tail % 8];
     regs[1][23] = 0;
@@ -218,7 +219,7 @@ static void mock_write(uint32_t r, uint32_t v)
         common[r] = (uint8_t)v;
     } else if (r < 16) {
         common[r] = (uint8_t)v;
-    } else if (index_reg == 0 && r == 17) {             /* EP0 CSR, host */
+    } else if (index_reg == 0 && r == 17 && ep_radr[0]) { /* EP0 CSR, host (the host code gave EP0 its buffer) */
         dev_t_ *d = by_addr(common[0]);
         if (v == 0x0A) {
             setup_requests++;
