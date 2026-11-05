@@ -13,8 +13,7 @@
 #define FELUCCA_OTA_DRYRUN 0
 #define FELUCCA_USB_PID 0x0002
 #ifdef LDR_SMK37                                    /* the SMK-37 (boards/smk37/): fm1-base tools/build.py -DLDR_SMK37 -DLDR_MODEL */
-#define FELUCCA_ID "ota-" LDR_MODEL "_900"           /* "ota-SMK-37 Pro_900", "ota-SMK-37 Elite_900", "ota-MKE-P37_900" */
-#define FM1_INPUT_TRIM 0                            /* (no factory curves needed: the buttons only) */
+#include "ldr_smk37.h"                              /* its identity, windows, staging and layout check */
 #else
 #define FELUCCA_ID "ota-FM-1_900"
 #endif
@@ -25,21 +24,7 @@
 #include "fm1_sys.h"
 /* the loader may write the app area and clear update records (program over one, or erase its own staging); never
  * the head, nor Felucca's store [0x97000, 0xE0000) (user data, never a record: ldr_core.c) */
-#ifdef LDR_SMK37
-/* the SMK-37 (boards/smk37/fm1_flash.h, first on the include path): the app area [0x4000, 0x9D000) and update
- * records only in the stock VM above it, up to BTIF (0xC0000); never BTIF, USRTRIM, the store, USR nor key_mac.
- * Its staging (ota.c's OTA_AREA, the record at 0xBFF00) is the board's */
-#define FL_RANGE_OK(off, n) FL_IN(off, n, FL_APP_LO, FL_REC_HI)
-#define OTA_AREA FL_OTA_LO
-#define LDR_APP_HI FL_APP_HI
-#define LDR_REC_LO FL_REC_LO
-#define LDR_REC_HI FL_REC_HI
-#define LDR_DATA_LO FL_DATA_LO
-#define LDR_DATA_HI FL_DATA_HI
-#define LDR_LAYOUT 1                                /* refuse a package not laid out for the SMK before any erase */
-#define LDR_APP_SLOT 0x97FBCu                       /* app.bin's slot (fm1-base tools/fm1pkg_make.py: the FM-1's 0x8DFBC + 0xA000) */
-#define LDR_VM_OFF FL_APP_HI                        /* the package's VM descriptor: the stock SMK's settings store, 0x9D000 */
-#else
+#ifndef LDR_SMK37                                   /* (the SMK-37's window: ldr_smk37.h) */
 #define FL_RANGE_OK(off, n) (FL_IN(off, n, 0x4000u, 0x97000u) || FL_IN(off, n, 0xE0000u, 0xFC000u))
 #endif
 #include "fm1_flash.h"
@@ -47,8 +32,8 @@
 #ifndef FL_BOARD_MAP
 #error "LDR_SMK37: build with -Iboards/smk37 before -Ichip (the board's fm1_flash.h)"
 #endif
-_Static_assert(FL_REC_LO == FL_APP_HI && FL_REC_HI == FL_PROT1_LO && FL_OTA_LO >= FL_REC_LO && FL_OTA_HI <= FL_REC_HI,
-               "the SMK's loader: records only between the app area and BTIF, its own staging among them");
+_Static_assert(LDR_SMK37_WINDOWS_OK, "the SMK's loader: records only between the app area and BTIF, its own staging "
+                                     "among them; its identity 23 characters at most");
 #endif
 #include "../chip/libc.c"
 #include "../chip/usb.c"
