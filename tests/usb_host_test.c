@@ -559,7 +559,7 @@ static uint32_t check_descriptors(int cdc_on, int verbose)
     }
     /* bcdDevice: each option set its own, so a host never reuses what it cached for another */
     {
-        uint32_t lo = 0x10u * (uint32_t)(has_uac + FELUCCA_UAC_48K) + 0x40u * (uint32_t)out + 0x08u * (uint32_t)as_first
+        uint32_t lo = 0x10u * (uint32_t)(has_uac + FELUCCA_UAC_48K) + 0x20u * (uint32_t)(FELUCCA_UAC_CH > 2) + 0x40u * (uint32_t)out + 0x08u * (uint32_t)as_first
                       + 0x80u * (uint32_t)(ml == 1) + (cdc_on ? 0x01u + 2u * FELUCCA_USB_LAYOUT : 0u);
         uint32_t hi = 3u + (uint32_t)(ml == 2) + 2u * (uint32_t)(FELUCCA_UAC_IAD && has_uac);
         assert(dv[12] == lo && dv[13] == hi);
@@ -1153,9 +1153,72 @@ int main(void)
 }
 
 #else
+#if UA_MC
+/* FELUCCA_UAC_CH: the stream's format and endpoint say the channels; a render's master and the app's channels come out
+ * of the packets in order, frame for frame, across the ring's end and the indices' wrap (UA_WRAP) */
+static void test_uac_channels(void)
+{
+    const uint8_t *d = CFG_DESC_PLAIN;
+    uint32_t i, at = 0, fmt = 0, ep = 0, term = 0, pass, sent = 1, got = 1;   /* (frame 0 would be silence) */
+    while (at < sizeof CFG_DESC_PLAIN) {
+        const uint8_t *x = d + at;
+        if (x[1] == 0x24 && x[2] == 2 && x[0] == 12 && x[3] == 1)
+            term = x[7];
+        if (x[1] == 0x24 && x[2] == 2 && x[0] == 11 && !fmt)
+            fmt = x[4], assert(x[5] == 2 && x[6] == 16 && x[7] == 1 && (x[8] | x[9] << 8 | x[10] << 16) == 44100u);
+        if (x[1] == 5 && x[2] == 0x84)
+            ep = (uint32_t)(x[4] | x[5] << 8);
+        at += x[0];
+    }
+    assert(term == FELUCCA_UAC_CH && fmt == FELUCCA_UAC_CH && ep == 46u * 2u * FELUCCA_UAC_CH && ep <= 1023u);
+    assert(UA_N % HALF_FRAMES == 0 && UA_WRAP % UA_N == 0);
+    usb.config = 1;
+    uac.alt = 1;
+    uac.flowing = 1;
+    uac.go = 0;
+    ua_w = ua_r = UA_WRAP - 3u * UA_N - 17u;            /* near the indices' wrap: they pass it below */
+    for (pass = 0; pass < 40u; pass++) {
+        static int32_t out[2u * HALF_FRAMES];
+        static int16_t pk[(UAC_MAXP + 3u) / 2u];
+        uint32_t k, run, c;
+        uac_render_start();
+        assert(uac.feed);
+        for (k = 0; k < HALF_FRAMES; k++, sent++) {     /* frame f: master f, -f; channel c: f * c */
+            int16_t *p = uac_ch_frame(k, &run);
+            if (!run || !p)
+                assert(0);
+            for (c = 2; c < FELUCCA_UAC_CH; c++)
+                p[c - 2u] = (int16_t)(p[c - 2u] + (int16_t)((sent & 0xFFFu) * c));
+            out[2u * k] = (int32_t)(sent & 0x7FFFu) << 8;
+            out[2u * k + 1u] = -((int32_t)(sent & 0x7FFFu) << 8);
+        }
+        uac_tap(out, HALF_FRAMES);
+        while (ua_fill(ua_w, ua_r) >= 50u) {            /* the packets while the ring holds one */
+            uint32_t n = uac_packet((uint32_t *)pk);
+            for (i = 0; i < n; i++) {
+                const int16_t *f = pk + i * FELUCCA_UAC_CH;
+                if (f[0] == 0 && f[1] == 0 && f[2] == 0 && got == 1)
+                    continue;                           /* the priming's silence */
+                assert(f[0] == (int16_t)(got & 0x7FFFu) && f[1] == (int16_t)-(int32_t)(got & 0x7FFFu));
+                for (c = 2; c < FELUCCA_UAC_CH; c++)
+                    assert(f[c] == (int16_t)((got & 0xFFFu) * c));
+                got++;
+            }
+        }
+    }
+    assert(got > 20u * HALF_FRAMES && ua_w < 8192u && !uac.underruns && !uac.overruns);
+    uac.alt = 0;
+    usb.config = 0;
+    printf("USB audio, %u channels: the format, a %u-byte endpoint, %u frames through a %u-frame ring and the wrap: OK\n",
+           (unsigned)FELUCCA_UAC_CH, (unsigned)ep, (unsigned)got, (unsigned)UA_N);
+}
+#endif
 int main(void)
 {
     test_descriptors();
+#if UA_MC
+    test_uac_channels();
+#endif
     usb_start();
     assert(usb.up && !usb.config);
     usb.config = 1;
