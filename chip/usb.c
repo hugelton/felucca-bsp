@@ -178,6 +178,15 @@ static struct {
 #ifndef FELUCCA_UAC_DEEP
 #define FELUCCA_UAC_DEEP 0
 #endif
+/* the polls (uac_service calls) a queued packet may wait before the host counts as gone (20 ms at the poll's 2 kHz).
+ * A caller that services the stream more often says how many make 20 ms: FELUCCA_UAC_CH's packets (~0.6 ms on the
+ * bus at 10 channels) are refilled every 0.1 ms (fm1-base's 10 kHz tick: 200), or the next frame's IN finds none */
+#ifndef FELUCCA_UAC_STALL_POLLS
+#define FELUCCA_UAC_STALL_POLLS 40u
+#endif
+#if FELUCCA_UAC_STALL_POLLS > 255
+#error "FELUCCA_UAC_STALL_POLLS is 1..255 (uac.wait is a byte)"
+#endif
 #ifndef FELUCCA_UAC_RING_ATTR
 #define FELUCCA_UAC_RING_ATTR
 #endif
@@ -2150,7 +2159,7 @@ static void uac_service(void)
     sie_wr(S_INDEX, 4);
     csr = sie_rd(S_TXCSR1);
     if (csr & 0x01u) {                                  /* still queued */
-        if (uac.wait < 255u && ++uac.wait == 40u && uac.flowing) {
+        if (uac.wait < 255u && ++uac.wait == FELUCCA_UAC_STALL_POLLS && uac.flowing) {
             uac.flowing = 0;
             uac.stalls++;
         }
