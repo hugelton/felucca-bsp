@@ -30,7 +30,9 @@
  *   ota_show(step, code)       progress / result for the screen
  *   ota_commit(parm)           write RAM record + reset (never returns on hardware)
  */
-#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB */
+#ifndef OTA_AREA
+#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB (the FM-1's; a board's fm1_flash.h FL_OTA_LO) */
+#endif
 #define OTA_AREA_LEN 0x5000u
 #define OTA_RES (OTA_AREA + OTA_AREA_LEN - 0x100u)  /* 0xE4F00 = 4K boundary - 256: SPL scan */
 #ifndef OTA_FRAME_MAX
@@ -115,6 +117,9 @@ static uint32_t ota_unpack7(const uint8_t *in, uint32_t n, uint8_t *out, uint32_
     return o;
 }
 
+#ifndef OTA_PARM_ID
+#define OTA_PARM_ID "ota-FM-1_015"                /* the update record's identity (a board may name its own) */
+#endif
 static uint8_t ota_msg[8 + 32], ota_wire[2 + 48];
 static uint8_t ota_dec[OTA_FRAME_MAX];           /* decoded host message */
 
@@ -363,6 +368,12 @@ static int ota_stage(void)                       /* steps 1..6; 0 = host said su
         return rc;
     if (!ota_off)
         return -3;
+#ifdef OTA_BOARD_FL_LEN
+    /* a board with its own layout: a package laid out for another board is refused before anything is touched. The
+     * FM-1's official package has the SMK-37's boot head and loader, and its loader would erase the SMK's calibration */
+    if (fl_len != OTA_BOARD_FL_LEN)
+        return -15;
+#endif
     /* 2. the package's writer (any: M-VAVE's, Felucca's, m-bootloader's installer, another firmware's), well
      *    made: its JLFS head and inner head right, loaded where the SPL runs it, small enough to stage */
     if (ota_read(ota_off, b, 512))
@@ -380,6 +391,23 @@ static int ota_stage(void)                       /* steps 1..6; 0 = host said su
         ota_show(2, 0);
         if ((rc = ota_boot_valid(fl_off, fl_len, b)) != 0)
             return rc;
+#ifdef OTA_BOARD_FL_LEN
+        /* another writer rewrites the region table too: it must be this flash's (both enciphered alike, so equal bytes
+         * mean an equal table), and its resources must go where this board keeps them */
+        {
+            static uint8_t rt[OTA_BOARD_RT_LEN];
+            uint32_t nent = ota_rd16(hdr + 8);
+            if (ota_read(fl_off + OTA_BOARD_RT_OFF, b, OTA_BOARD_RT_LEN) || ota_fread(OTA_BOARD_RT_OFF, rt, OTA_BOARD_RT_LEN))
+                return -4;
+            if (!ota_memeq(b, rt, OTA_BOARD_RT_LEN))
+                return -16;
+            for (i = 0; i < nent && i < 11u; i++) {
+                const uint8_t *e = hdr + 0x40 + i * 0x50u;
+                if (ota_rd16(e) == 50u && (ota_rd32(e + 0x1C) != OTA_BOARD_USR_LO || ota_rd32(e + 0x20) != OTA_BOARD_USR_LEN))
+                    return -17;
+            }
+        }
+#endif
     }
     /* 4. stage the package's loader: erase, body, verify, head last */
     ota_show(3, 0);
@@ -447,8 +475,8 @@ static int ota_session(void)
     ota_wr16(parm + 2, 0x5A0Du);
     ota_wr16(parm + 4, 0x5A01u);
     ota_wr16(parm + 6, 0x5441u);
-    for (i = 0; i < 12u; i++)
-        parm[8 + i] = (uint8_t)"ota-FM-1_015"[i];    /* the loader's own USB identity */
+    for (i = 0; i < sizeof OTA_PARM_ID - 1u; i++)
+        parm[8 + i] = (uint8_t)OTA_PARM_ID[i];       /* the loader's own USB identity */
     ota_wr32(parm + 72, OTA_AREA);
     ota_wr16(parm, ota_crc16(parm + 2, 78, 0));
 #if FELUCCA_OTA_DRYRUN

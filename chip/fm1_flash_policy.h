@@ -35,7 +35,9 @@
     (uint32_t)(off) >= (uint32_t)(lo) && (uint32_t)(off) <= (uint32_t)(hi) && \
     (uint32_t)(n) <= (uint32_t)(hi) - (uint32_t)(off))
 
-/* Compatibility names; new applications supply their own regions above. */
+/* Compatibility names; new applications supply their own regions above. A board with its own flash map
+ * (boards/smk37/fm1_flash.h) defines FL_BOARD_MAP, these names and its write regions itself. */
+#ifndef FL_BOARD_MAP
 #define FL_DATA_LO 0x00097000u
 #define FL_DATA_HI 0x000E0000u
 #define FL_GLOB_LO 0x000FC000u
@@ -52,8 +54,12 @@
     FL_IN(off, n, FL_GLOB_LO, FL_GLOB_HI) || FL_IN(off, n, FL_AUTO_LO, FL_AUTO_HI))
 #define FL_XDATA_OK(off, n) (FL_IN(off, n, FL_XDATA0_LO, FL_XDATA0_HI) || \
     FL_IN(off, n, FL_XDATA1_LO, FL_XDATA1_HI))
+#endif /* FL_BOARD_MAP */
 #ifndef FL_RANGE_OK
 #ifndef FM1_FLASH_WRITE_REGIONS
+#ifdef FL_BOARD_MAP
+#error "a board flash map (FL_BOARD_MAP) brings its own FM1_FLASH_WRITE_REGIONS"
+#endif
 #define FM1_FLASH_WRITE_REGIONS(X) \
     X(FL_DATA_LO, FL_DATA_HI) X(FL_GLOB_LO, FL_GLOB_HI) \
     X(FL_AUTO_LO, FL_AUTO_HI) X(FL_XDATA0_LO, FL_XDATA0_HI) \

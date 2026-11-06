@@ -50,6 +50,34 @@ erased (or unlike an update record): the loader searches there for records to
 clear. Boot head, OTA layout and loader compatibility remain board contracts;
 an application's region list must respect them.
 
+### A board's own map
+
+A board whose flash is laid out differently brings its own `fm1_flash.h`, which
+shadows the chip's on the include path and includes it (`boards/smk37/`: build
+with `-Iboards/smk37 -Ichip`). It defines `FL_BOARD_MAP`, the same names as the
+compatibility layout above at its own offsets, `FM1_FLASH_PLAIN_LO` and its
+`FM1_FLASH_WRITE_REGIONS` (an application may still name fewer before it), then
+includes `fm1_flash_policy.h`. With `FL_BOARD_MAP` the policy defines none of the
+FM-1's names and refuses a build that gives no regions. The SMK-37's:
+
+| Physical offsets | Use |
+| --- | --- |
+| `0x00000..0x04000` | Boot head: never written |
+| `0x04000..0x9D000` | App area (the updater only); plain XIP from `0x9D000` |
+| `0x9D000..0xA1000` | Extra data (`FL_XDATA0`) |
+| `0xA1000..0xA3000` | Autosave |
+| `0xA3000..0xBB000` | Extra data (`FL_XDATA1`) |
+| `0xBB000..0xC0000` | OTA staging (`chip/ota.c` `OTA_AREA`, record `0xBFF00`) |
+| `0xC0000..0xC2000` | BTIF, USRTRIM (factory calibration): never written |
+| `0xC2000..0xEA000` | Main store |
+| `0xEA000..0xEB000` | The stock firmware's marker (released once) |
+| `0xEB000..0xEE000` | Globals |
+| `0xEE000..0xF4000` | Extra data (`FL_FREE`: unlisted in the stock table; no record rule) |
+| `0xF4000..0xFE000`, `0xFF000..0x100000` | USR, key_mac: never written |
+
+Its updater (`loader/ldr_smk37.h`) writes `0x4000..0xC0000` only: the app area,
+and update records in the stock VM up to BTIF.
+
 ## API and errors
 
 | Function | Behavior |
@@ -148,10 +176,12 @@ tests/run_flash_tests.sh
 JIELI_TOOLCHAIN=/path/to/toolchain python3 tests/check_flash_target.py
 ```
 
-Host tests exercise default/custom/read-only/loader/expanded policies, whole-range
+Host tests exercise default/custom/read-only/loader/expanded policies and the
+SMK-37's map (every sector, its protected ranges through the driver), whole-range
 rejection, page splitting, buffer bounds, nested interrupt restoration, busy CPU1
 refusal, and error exits. The target check builds/links the safe and CPU1 examples,
-fallback mode, an expanded-flash configuration with UID, and the loader. It
+fallback mode, an expanded-flash configuration with UID, and the loader (the FM-1's
+and the SMK-37's for each model). It
 checks flash RAM routines for calls and direct branches into XIP and confirms
 that the loader lives in RAM. These checks do not replace on-device erase/read/
 write, interrupt-state and simultaneous audio/CPU1 validation.

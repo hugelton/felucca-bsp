@@ -36,12 +36,20 @@ belong to their owners.
 | --- | --- |
 | M-VAVE FM-1 | Supported. Used by Felucca. |
 | M-VAVE Galaxia | Supported (board code: audio, knobs, switches, jacks, LED). Used by [GalaxiaSDK](https://github.com/dhilowitz/GalaxiaSDK). |
-| M-VAVE SMK-37 Elite | Planned. Not started. |
-| M-VAVE SMK-37 Pro | Planned. No board support yet. |
+| M-VAVE SMK-37 Pro / Elite / MKE-P37 | Board layer (`boards/smk37/`): the matrix, LEDs, pads, faders, wheels, pedal, LCD, flash map, TRS out. Run on an Elite (keys, buttons, encoders, pads, faders, the panel); the rest not yet checked on a unit, the Pro and MKE-P37 untried; every fact marked. |
 
 "Planned" means the device is a target, not that it works. A device gets its own directory
 under `boards/` once someone has it running. Pin maps and other board facts are added only
 when they have been checked on a real unit.
+
+`boards/smk37/` was written ahead of a unit, from M. Geisler's analysis of the stock SMK-37 v016 firmware
+([fm1-to-smk37](https://github.com/genkigenki/fm1-to-smk37), its facts credited in each header, none of its code),
+under MPL-2.0 by Kerem Kilic (Ellic Studio), and has since run on an Elite: under
+[Saadet](https://github.com/keremimo/saadet) its keys with velocity, buttons, encoders, pads, faders, BANK buttons and
+panel work. Each fact is marked *verified* (on an Elite running Melodee, per that analysis) or *analysis*; the wheels,
+the pedal, the LEDs, the battery, the codec and TRS out are not yet checked on a unit by this layer, and no Pro or
+MKE-P37 has run it. The three models (Pro, Elite, MKE-P37) are the same hardware with their own package identities;
+fm1-base's `tools/build.py` builds for it with `board = "smk37"`.
 
 ## Layout
 
@@ -54,6 +62,7 @@ when they have been checked on a real unit.
 | `loader/` | The update loader (builds as a RAM image; it includes `chip/usb.c`, `chip/ota.c` and `chip/libc.c`) |
 | `boards/fm1/` | FM-1 wiring and drivers: ST7789 panel initialization and RGB565 transfers (`fm1_lcd.h`), key scan (with velocity and pressure from the keys, off by default: `fm1_input.h`), ADC channels, checked stereo Q23 audio DMA (`fm1_audio.h`), the headphone jack's switch (PB5: `fm1_jack.h`) |
 | `boards/galaxia/` | Galaxia (a guitar pedal, board PD49 V03) wiring and drivers in one header, `gx_board.h`: the stereo converter on ALNK0 (44,118 Hz), six knobs including a nine-detent selector, two footswitches, the input jack detects, the two-colour LED |
+| `boards/smk37/` | SMK-37 wiring and drivers, the same header names: the 595 chain's matrix with two-contact velocity, 18 buttons, 8 encoders, 19 LEDs in two commons (`fm1_input.h`), the three analog muxes (`fm1_adc.h`: pads, faders, wheels, pedal, battery), the LCD on its own SPI1 group and the pad LEDs' frame (`fm1_lcd_hw.h`), the 1 MiB flash map with its protected windows (`fm1_flash.h`, over `chip/fm1_flash.h`), the TRS jack as MIDI OUT (`fm1_uart.h`), the codec as the FM-1's, unmeasured (`fm1_audio.h`) |
 | `docs/BOARD_IO.md` | Panel API, pixel byte order and lifetime; audio sample/rate guarantees, buffer validation, stop/restart and underrun behavior |
 | `docs/EXPERIMENTAL.md` | Second core, expanded flash, USB host, clock: what is established and what is not |
 | `docs/FLASH.md` | Application write regions, flash API, interrupt preservation, CPU1 coordination and verification |
@@ -62,7 +71,8 @@ when they have been checked on a real unit.
 | `examples/hwtest/` | Test firmware for a real FM-1: screen, knob, buttons, LEDs, USB serial. `hwtest.bin` is the safe image; `hwtest-exp.bin` adds the experimental parts |
 | `examples/felucca/` | Reference only: `ota_hw.c`, the hooks Felucca gives `ota.c`. Not built here |
 
-Headers include each other by file name. Build with `-Ichip -Iboards/fm1`. The loader builds from this tree with
+Headers include each other by file name. Build with `-Ichip -Iboards/fm1`, or `-Iboards/smk37 -Ichip` for the SMK-37
+(its `fm1_flash.h` shadows the chip's and includes it). The loader builds from this tree with
 the JieLi toolchain and gives the same image as it does inside Felucca.
 
 `tools/` has the package builder, the USB-MIDI installer and `fm1_rescue` (stock firmware back on an FM-1 that cannot

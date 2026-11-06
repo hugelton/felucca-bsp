@@ -8,7 +8,7 @@ trap 'rm -rf "$OUT"' EXIT HUP INT TERM
 CC=${CC:-cc}
 # FLASH_TEST_SANITIZE= (empty) builds without the sanitizers (on a Mac where ASan hangs at start-up).
 SANITIZE=${FLASH_TEST_SANITIZE--fsanitize=address,undefined}
-for layout in 0 1 2 3 4 0-nocpu1; do
+for layout in 0 1 2 3 4 5 0-nocpu1; do
     cpu1=1
     case "$layout" in *-nocpu1) layout=${layout%-nocpu1}; cpu1=0 ;; esac
     "$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -O2 \
@@ -22,6 +22,10 @@ for plain_hi in 0x100000u 0xA0000u; do
         "$ROOT/tests/flash_driver_test.c" -o "$OUT/driver"
     "$OUT/driver"
 done
+# the SMK-37's map over the same driver (boards/smk37/fm1_flash.h shadows the chip's: its regions, its plain window)
+"$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -Wno-int-to-pointer-cast -O2 \
+    $SANITIZE -I"$ROOT/boards/smk37" -I"$ROOT/chip" "$ROOT/tests/flash_driver_test.c" -o "$OUT/driver-smk37"
+"$OUT/driver-smk37"
 for config in '-DFM1_FLASH_SIZE=0x2000000u' '-DFM1_FLASH_SIZE=0x80000u' \
     '-DFM1_FLASH_XIP_SIZE=0x200000u' '-DFM1_FLASH_PLAIN_LO=0u' \
     '-DFM1_FLASH_PLAIN_HI=0x92000u'; do
@@ -31,4 +35,17 @@ for config in '-DFM1_FLASH_SIZE=0x2000000u' '-DFM1_FLASH_SIZE=0x80000u' \
         exit 1
     fi
 done
+# a board's map after the chip's (chip/fm1_clock.h includes the chip's fm1_flash.h by name): the build stops
+if printf '#include "fm1_clock.h"\n#include "fm1_flash.h"\n' | \
+    "$CC" -I"$ROOT/boards/smk37" -I"$ROOT/chip" -x c -E -o "$OUT/pp.i" - 2>"$OUT/error"; then
+    echo "FAIL: accepted the SMK-37's map after the chip's" >&2
+    exit 1
+fi
+grep -q "include it before any chip flash header" "$OUT/error" || { cat "$OUT/error" >&2; exit 1; }
+printf '#include "fm1_flash.h"\n#include "fm1_clock.h"\n' | \
+    "$CC" -I"$ROOT/boards/smk37" -I"$ROOT/chip" -x c -E -o "$OUT/pp.i" -     # (the right order: through)
 echo 'flash configuration rejection checks passed'
+# a board's own map under the policy (FL_BOARD_MAP): the SMK-37's windows, its protected ranges, the loader's window
+"$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -O2 $SANITIZE -I"$ROOT/boards/smk37" -I"$ROOT/chip" \
+    "$ROOT/tests/smk37_flash_map_test.c" -o "$OUT/smk37-map"
+"$OUT/smk37-map"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
 # Copyright (C) 2026 Kerem Kilic (Ellic Studio)
-"""Build/link the BSP examples and loader; audit RAM-only flash/CPU1 code.
+"""Build/link the BSP examples and loader (the FM-1's, and the SMK-37's for each model); audit RAM-only flash/CPU1 code.
 
 JIELI_TOOLCHAIN=/path/to/toolchain python3 tests/check_flash_target.py
 Uses Docker on macOS/non-x86 Linux (override JIELI_DOCKER=0 or 1).
@@ -45,13 +45,20 @@ with tempfile.TemporaryDirectory(prefix="fm1-flash-target-") as tmp:
                 f"{dest}/{name}.o", "-o", f"{dest}/{name}.elf")
         command(f"{tc}/common/bin/objdump", "-d", "-mcpu=r3", "-mattr=+fprev1", "-j", ".ram_text", f"{dest}/{name}.elf")
         commands[-1] += f" > {shlex.quote(f'{dest}/{name}.dis')}"
-    command(*cc, *flags, "-c", "loader/loader.c", "-o", f"{dest}/loader.o")
-    command(f"{tc}/pi32v2/bin/ld", "--gc-sections", "-e", "_start", "-T", "loader/loader.ld",
-            f"{dest}/ldr-start.o", f"{dest}/loader.o", "-o", f"{dest}/loader.elf")
-    command(f"{tc}/common/bin/objdump", "-h", f"{dest}/loader.elf")
-    commands[-1] += f" > {shlex.quote(f'{dest}/loader.sections')}"
-    command(f"{tc}/common/bin/objdump", "-d", "-mcpu=r3", "-mattr=+fprev1", f"{dest}/loader.elf")
-    commands[-1] += f" > {shlex.quote(f'{dest}/loader.dis')}"
+    # the loaders: the FM-1's, and the SMK-37's per model (loader/ldr_smk37.h; the board's headers first, as fm1-base's
+    # tools/build.py builds it for board = "smk37")
+    smk = ["-Os", "-ffunction-sections", "-fno-builtin", "-Wall", "-Werror", "-Wno-unused-function",
+           "-Iboards/smk37", "-Ichip", "-DLDR_SMK37=1"]
+    loaders = [("loader", flags), *[(f"loader-smk37-{m.split()[-1].lower()}", [*smk, f'-DLDR_MODEL="{m}"'])
+                                    for m in ("SMK-37 Pro", "SMK-37 Elite", "MKE-P37")]]
+    for name, opts in loaders:
+        command(*cc, *opts, "-c", "loader/loader.c", "-o", f"{dest}/{name}.o")
+        command(f"{tc}/pi32v2/bin/ld", "--gc-sections", "-e", "_start", "-T", "loader/loader.ld",
+                f"{dest}/ldr-start.o", f"{dest}/{name}.o", "-o", f"{dest}/{name}.elf")
+        command(f"{tc}/common/bin/objdump", "-h", f"{dest}/{name}.elf")
+        commands[-1] += f" > {shlex.quote(f'{dest}/{name}.sections')}"
+        command(f"{tc}/common/bin/objdump", "-d", "-mcpu=r3", "-mattr=+fprev1", f"{dest}/{name}.elf")
+        commands[-1] += f" > {shlex.quote(f'{dest}/{name}.dis')}"
     script = "set -eu\n" + "\n".join(commands)
     if DOCKER:
         run = ["docker", "run", "--rm", "--platform", "linux/amd64", "-v", f"{ROOT}:/work:ro",
@@ -81,17 +88,18 @@ with tempfile.TemporaryDirectory(prefix="fm1-flash-target-") as tmp:
         if name == "expanded":
             assert "fl_uid_ram" in found
         print(f"{name}: linked; flash RAM routines contain no calls or direct XIP branches")
-    sections = set()
-    for line in (out / "loader.sections").read_text().splitlines():
-        m = re.match(r"\s*\d+\s+(\.\S+)\s+([0-9a-f]+)\s+([0-9a-f]+)", line)
-        if m and int(m[2], 16) and m[1] in (".text", ".bss"):
-            start, size = int(m[3], 16), int(m[2], 16)
-            assert 0x1C00000 <= start and start + size <= 0x1C80000, line
-            sections.add(m[1])
-    assert sections == {".text", ".bss"}, sections
-    for line in (out / "loader.dis").read_text().splitlines():
-        if re.search(r"\b(?:call|goto)\b", line):
-            target = re.search(r": ([0-9a-f]+) >", line)
-            if target:
-                assert 0x1C00000 <= int(target[1], 16) < 0x1C80000, line
-    print("loader: linked entirely in RAM; no direct calls/branches into XIP")
+    for name, _ in loaders:
+        sections = set()
+        for line in (out / f"{name}.sections").read_text().splitlines():
+            m = re.match(r"\s*\d+\s+(\.\S+)\s+([0-9a-f]+)\s+([0-9a-f]+)", line)
+            if m and int(m[2], 16) and m[1] in (".text", ".bss"):
+                start, size = int(m[3], 16), int(m[2], 16)
+                assert 0x1C00000 <= start and start + size <= 0x1C80000, line
+                sections.add(m[1])
+        assert sections == {".text", ".bss"}, (name, sections)
+        for line in (out / f"{name}.dis").read_text().splitlines():
+            if re.search(r"\b(?:call|goto)\b", line):
+                target = re.search(r": ([0-9a-f]+) >", line)
+                if target:
+                    assert 0x1C00000 <= int(target[1], 16) < 0x1C80000, line
+        print(f"{name}: linked entirely in RAM; no direct calls/branches into XIP")
