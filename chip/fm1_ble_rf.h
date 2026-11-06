@@ -210,6 +210,25 @@ static uint8_t fm1_rfc_x187[68];                            /* the record built 
 static uint8_t fm1_rfc_scanned, fm1_rfc_trimmed;
 static int fm1_rfc_scan_rc, fm1_rfc_trim_rc;
 
+/* The Wi-Fi IQ entries the replay writes last (RF-CALIBRATION.md §4.1: window D 0x04-0x09 the TX gains, phases and DCs,
+ * 0x61 / 0x62 their low bits; D' 0x09-0x0C the RX gains and phases): the Wi-Fi PHY's alone (the BT side takes its compensation
+ * from the record into 0x2FC08 / 0x2FC10 at the start, fm1_ble.h, and never reads these). Kept as written, so that
+ * fm1_rf_cal_wifi_iq can put another record's fields in after the start, or these back. Keeping them changes no write */
+#define FM1_RFC_WIQ_N 12u
+static const uint8_t fm1_rfc_wiq_w[FM1_RFC_WIQ_N] = {2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3};
+static const uint8_t fm1_rfc_wiq_e[FM1_RFC_WIQ_N] = {0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x61, 0x62, 0x09, 0x0A, 0x0B, 0x0C};
+static uint8_t fm1_rfc_wiq[FM1_RFC_WIQ_N];
+static uint16_t fm1_rfc_wiq_mask;                           /* bit k: entry k was written by the replay */
+static void fm1_rfc_wiq_keep(uint32_t w, uint32_t entry, uint32_t v)
+{
+    uint32_t k;
+    for (k = 0; k < FM1_RFC_WIQ_N; k++)
+        if (fm1_rfc_wiq_w[k] == w && fm1_rfc_wiq_e[k] == entry) {
+            fm1_rfc_wiq[k] = (uint8_t)v;
+            fm1_rfc_wiq_mask |= (uint16_t)(1u << k);
+        }
+}
+
 /* the rest of the replay with measured values: a 187 field's write gets the record's true fields (the captured ones
  * are 1-2-bit slices found by perturbation) */
 static int fm1_rfc_is187(const uint8_t *trim, uint32_t nt)
@@ -435,6 +454,7 @@ static void fm1_ble_rf_exec(uint32_t pc, uint32_t end, const uint8_t *const rec[
                 for (i = 0; i < nt; i++)
                     v = fm1_rf_field(v, trim[i], rec);
             fm1_bbp_win_wr(op & 3u, p[pc + 1], v);
+            fm1_rfc_wiq_keep(op & 3u, p[pc + 1], v);
             nt = rmw = 0;
             pc += 3;
         } else if ((op & 0xFCu) == 0x84u) {                 /* a window read */
@@ -511,4 +531,24 @@ static void fm1_ble_rf_run(const uint8_t *x106, const uint8_t *x107, const uint8
                                                              * rx_tx_cal_attenuation(0)); the replay's words are a
                                                              * start without a trim (measured against the SDK build) */
     fm1_ble_rf_stat.ran = 1;
+}
+
+/* After the start (fm1-base's Wi-Fi tuning, its stored calibration): the Wi-Fi IQ entries kept above again, with the TX
+ * gains, phases and DCs (record bytes 0-23) and the RX gains and phases (26-29) of x187, as JieLi's quick_start_wifi_trim
+ * puts a stored record's in (RF-CALIBRATION.md §4.5: each through fm1_rf_cal_win, 0x62's bits 7-4 the replay's); x187 0:
+ * the replay's own values back. Only the entries the replay wrote; the TX LO, the RX DC, the filter codes, the RF-die
+ * table and the BT trims stay as the start left them. -> the entries written (0: the replay wrote none, nothing done) */
+static uint32_t fm1_rf_cal_wifi_iq(const uint8_t *x187)
+{
+    uint32_t k, n = 0, v;
+    for (k = 0; k < FM1_RFC_WIQ_N; k++) {
+        if (!(fm1_rfc_wiq_mask >> k & 1u))
+            continue;
+        v = fm1_rfc_wiq[k];
+        if (x187)
+            v = fm1_rf_cal_win(fm1_rfc_wiq_w[k], fm1_rfc_wiq_e[k], v, x187);
+        fm1_bbp_win_wr(fm1_rfc_wiq_w[k], fm1_rfc_wiq_e[k], v);
+        n++;
+    }
+    return n;
 }
