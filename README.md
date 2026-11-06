@@ -36,18 +36,20 @@ belong to their owners.
 | --- | --- |
 | M-VAVE FM-1 | Supported. Used by Felucca. |
 | M-VAVE Galaxia | Supported (board code: audio, knobs, switches, jacks, LED). Used by [GalaxiaSDK](https://github.com/dhilowitz/GalaxiaSDK). |
-| M-VAVE SMK-37 Pro / Elite / MKE-P37 | Board layer written, blind (`boards/smk37/`): the matrix, LEDs, pads, faders, wheels, pedal, LCD, flash map, TRS out. Not yet run on a unit; every fact marked. |
+| M-VAVE SMK-37 Pro / Elite / MKE-P37 | Board layer (`boards/smk37/`): the matrix, LEDs, pads, faders, wheels, pedal, LCD, flash map, TRS out. Run on an Elite (keys, buttons, encoders, pads, faders, the panel); the rest not yet checked on a unit, the Pro and MKE-P37 untried; every fact marked. |
 
 "Planned" means the device is a target, not that it works. A device gets its own directory
 under `boards/` once someone has it running. Pin maps and other board facts are added only
 when they have been checked on a real unit.
 
-`boards/smk37/` is the exception the note above allows for: it is written ahead of a unit, from M. Geisler's
-analysis of the stock SMK-37 v016 firmware ([fm1-to-smk37](https://github.com/genkigenki/fm1-to-smk37), its facts
-credited in each header, none of its code), under MPL-2.0 by Kerem Kilic (Ellic Studio). Each fact is marked
-*verified* (on an Elite running Melodee, per that analysis) or *analysis*; the layer itself has not been checked on
-a unit, and its tables carry that note until it has. The three models (Pro, Elite, MKE-P37) are the same hardware
-with their own package identities; fm1-base's `tools/build.py` builds for it with `board = "smk37"`.
+`boards/smk37/` was written ahead of a unit, from M. Geisler's analysis of the stock SMK-37 v016 firmware
+([fm1-to-smk37](https://github.com/genkigenki/fm1-to-smk37), its facts credited in each header, none of its code),
+under MPL-2.0 by Kerem Kilic (Ellic Studio), and has since run on an Elite: under
+[Saadet](https://github.com/keremimo/saadet) its keys with velocity, buttons, encoders, pads, faders, BANK buttons and
+panel work. Each fact is marked *verified* (on an Elite running Melodee, per that analysis) or *analysis*; the wheels,
+the pedal, the LEDs, the battery, the codec and TRS out are not yet checked on a unit by this layer, and no Pro or
+MKE-P37 has run it. The three models (Pro, Elite, MKE-P37) are the same hardware with their own package identities;
+fm1-base's `tools/build.py` builds for it with `board = "smk37"`.
 
 ## Layout
 

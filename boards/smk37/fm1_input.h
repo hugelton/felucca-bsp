@@ -49,8 +49,9 @@
  * Board facts: M. Geisler's analysis of the stock v016 firmware (fm1-to-smk37 docs/01-hardware.md §5-6: the
  * pins, the word layout, the rows, the key, button, encoder and LED tables and the mux tables are marked
  * verified there, on an Elite running Melodee; the 595's SPI mode, /OE and the commons' register sequence are
- * analysis). The SDK's spi.h gives the same SPI2 group. NOT YET CHECKED ON A UNIT by this layer (fm1-base's
- * SMK-37 port, step 2): every table below is to be confirmed on Kerem's Elite before a release. */
+ * analysis). The SDK's spi.h gives the same SPI2 group. Run by this layer on an Elite (Saadet, 2026-11-05): the
+ * key, button, encoder, pad and fader tables work there; the wheels, the pedal, the LED tables and the battery are
+ * still to be confirmed on a unit. */
 #pragma once
 #include <stdint.h>
 #include "fm1_time.h"
