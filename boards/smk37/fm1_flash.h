@@ -53,6 +53,7 @@
 #ifdef FL_DATA_LO
 #error "boards/smk37/fm1_flash.h: include it before any chip flash header (fm1_flash.h, fm1_clock.h): the FM-1's map is in"
 #endif
+#include "fm1_board_map.h"
 #define FL_BOARD_MAP 1                                /* the flash gate takes these instead of the FM-1's */
 #define FL_JEDEC_ID     0x00EB6014u                   /* the part named in the board notes */
 /* the parts found on these keyboards: units differ, so a build must not lock itself to one (a part it refuses

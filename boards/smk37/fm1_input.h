@@ -54,6 +54,7 @@
  * still to be confirmed on a unit. */
 #pragma once
 #include <stdint.h>
+#include "fm1_board_map.h"                    /* this board's flash map, not the chip's */
 #include "fm1_time.h"
 #include "fm1_gpio.h"
 #include "fm1_adc.h"

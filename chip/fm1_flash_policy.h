@@ -38,6 +38,9 @@
 /* Compatibility names; new applications supply their own regions above. A board with its own flash map
  * (boards/smk37/fm1_flash.h) defines FL_BOARD_MAP, these names and its write regions itself. */
 #ifndef FL_BOARD_MAP
+#ifdef FL_BOARD_NEEDS_MAP
+#error "chip/fm1_flash_policy.h: this board has its own flash map (boards/<board>/fm1_flash.h), and it is not in"
+#endif
 #define FL_DATA_LO 0x00097000u
 #define FL_DATA_HI 0x000E0000u
 #define FL_GLOB_LO 0x000FC000u

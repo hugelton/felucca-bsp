@@ -44,6 +44,19 @@ fi
 grep -q "include it before any chip flash header" "$OUT/error" || { cat "$OUT/error" >&2; exit 1; }
 printf '#include "fm1_flash.h"\n#include "fm1_clock.h"\n' | \
     "$CC" -I"$ROOT/boards/smk37" -I"$ROOT/chip" -x c -E -o "$OUT/pp.i" -     # (the right order: through)
+# an SMK-37 build that gets the chip's map (-Ichip first), or has it in before a board header: the build stops
+if printf '#include "fm1_input.h"\n#include "fm1_flash.h"\n' | \
+    "$CC" -I"$ROOT/chip" -I"$ROOT/boards/smk37" -x c -E -o "$OUT/pp.i" - 2>"$OUT/error"; then
+    echo "FAIL: accepted an SMK-37 build with the chip's map (-Ichip first)" >&2
+    exit 1
+fi
+grep -q "this board has its own flash map" "$OUT/error" || { cat "$OUT/error" >&2; exit 1; }
+if printf '#include "fm1_clock.h"\n#include "fm1_adc.h"\n' | \
+    "$CC" -I"$ROOT/boards/smk37" -I"$ROOT/chip" -x c -E -o "$OUT/pp.i" - 2>"$OUT/error"; then
+    echo "FAIL: accepted an SMK-37 header after the chip's map" >&2
+    exit 1
+fi
+grep -q "the chip's flash map is in, not the board's" "$OUT/error" || { cat "$OUT/error" >&2; exit 1; }
 echo 'flash configuration rejection checks passed'
 # a board's own map under the policy (FL_BOARD_MAP): the SMK-37's windows, its protected ranges, the loader's window
 "$CC" -std=c99 -Wall -Wextra -Werror -Wno-unused-function -O2 $SANITIZE -I"$ROOT/boards/smk37" -I"$ROOT/chip" \

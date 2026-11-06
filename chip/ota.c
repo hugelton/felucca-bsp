@@ -30,6 +30,18 @@
  *   ota_show(step, code)       progress / result for the screen
  *   ota_commit(parm)           write RAM record + reset (never returns on hardware)
  */
+#ifdef FL_BOARD_MAP
+/* a board with its own flash map (boards/smk37) stages in its own window, and an app on it must name its layout and
+ * its update record, or this would stage over its store at the FM-1's 0xE0000 and take another board's package (the
+ * update loader, FELUCCA_LOADER or a board's LDR_LAYOUT, stages nothing: its own check is ldr_core.c's 2a) */
+#ifndef OTA_AREA
+#define OTA_AREA FL_OTA_LO
+#endif
+#if !defined(FELUCCA_LOADER) && !defined(LDR_LAYOUT) && (!defined(OTA_BOARD_FL_LEN) || !defined(OTA_BOARD_RT_OFF) || !defined(OTA_BOARD_RT_LEN) || \
+    !defined(OTA_BOARD_USR_LO) || !defined(OTA_BOARD_USR_LEN) || !defined(OTA_PARM_ID))
+#error "chip/ota.c on a board's own flash map: define OTA_BOARD_FL_LEN, OTA_BOARD_RT_*, OTA_BOARD_USR_* and OTA_PARM_ID"
+#endif
+#endif
 #ifndef OTA_AREA
 #define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB (the FM-1's; a board's fm1_flash.h FL_OTA_LO) */
 #endif
@@ -119,6 +131,10 @@ static uint32_t ota_unpack7(const uint8_t *in, uint32_t n, uint8_t *out, uint32_
 
 #ifndef OTA_PARM_ID
 #define OTA_PARM_ID "ota-FM-1_015"                /* the update record's identity (a board may name its own) */
+#endif
+_Static_assert(sizeof OTA_PARM_ID <= 64u, "OTA_PARM_ID: 63 characters at most (the record's identity, bytes 8..71)");
+#ifdef OTA_BOARD_FL_LEN
+_Static_assert(OTA_BOARD_RT_LEN <= 512u, "OTA_BOARD_RT_LEN: the region table is read whole into ota_stage's 512 bytes");
 #endif
 static uint8_t ota_msg[8 + 32], ota_wire[2 + 48];
 static uint8_t ota_dec[OTA_FRAME_MAX];           /* decoded host message */

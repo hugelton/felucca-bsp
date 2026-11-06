@@ -29,6 +29,7 @@
  * start delay in units of 8 ADC clocks. */
 #pragma once
 #include <stdint.h>
+#include "fm1_board_map.h"                    /* this board's flash map, not the chip's */
 #include "fm1_gpio.h"
 
 #define FM1_ADC_CON_R (*(volatile uint32_t *)0x13100u)
