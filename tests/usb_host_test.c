@@ -1153,6 +1153,71 @@ int main(void)
 }
 
 #else
+#if FELUCCA_UAC
+/* The packets' pacing: renders of HALF_FRAMES on the FM-1's I2S clock (6 MHz / 136, its crystal ppm off), a packet a
+ * ms on the host's. The stream must hold (no underrun, no overrun), carry the I2S clock's frames, and never steer two
+ * packets in a row: a host that follows an asynchronous device's rate closely (iOS's Camera) filled the 5..6 short
+ * packets of the old steering with silence. Time in 1/60 GHz: a ms is 60,000,000, a render 174,080,000 */
+static void test_uac_pace(int r48, int32_t ppm)
+{
+    const uint64_t MS = 60000000u, REND = 174080000u + (uint64_t)((int64_t)174080 * ppm / 1000);
+    uint64_t t_r = REND / 3u, t_p = 0;
+    uint32_t pkts = 0, adj_prev = 0, adjs = 0, runs = 0, lo_n = 99, hi_n = 0, base = r48 ? 48u : 44u;
+    uint32_t under0 = 0, over0 = 0;
+    uint64_t sent = 0, made = 0;
+    static int32_t out[2u * HALF_FRAMES];
+    static uint32_t pk[(UAC_MAXP + 3u) / 4u];
+    memset(&uac, 0, sizeof uac);
+    usb.config = 1;
+    uac.alt = 1;
+    uac.flowing = 1;
+#if FELUCCA_UAC_48K
+    uac.r48 = (uint8_t)r48;
+#else
+    assert(!r48);
+#endif
+    ua_w = ua_r = 0;
+    while (pkts < 61000u) {
+        if (t_r <= t_p) {                               /* the audio interrupt: a render */
+            uint32_t k;
+            uac_render_start();
+            for (k = 0; k < 2u * HALF_FRAMES; k++)
+                out[k] = 1000 << 8;
+            uac_tap(out, HALF_FRAMES);
+            if (pkts >= 1000u)
+                made += HALF_FRAMES;
+            t_r += REND;
+        } else {                                        /* the host's IN token, once a ms */
+            uint32_t a0 = uac.adj_up + uac.adj_down, n = uac_packet(pk), adj;
+            adj = uac.adj_up + uac.adj_down - a0;
+            if (++pkts == 1000u)                        /* a second to settle, then counted */
+                under0 = uac.underruns, over0 = uac.overruns;
+            if (pkts > 1000u) {
+                sent += n;
+                adjs += adj;
+                runs += adj && adj_prev;
+                lo_n = n < lo_n ? n : lo_n;
+                hi_n = n > hi_n ? n : hi_n;
+            }
+            adj_prev = adj;
+            t_p += MS;
+        }
+    }
+    assert(uac.underruns == under0 && uac.overruns == over0);
+    assert(runs == 0);                                  /* never two steered packets in a row */
+    assert(lo_n >= base - 1u && hi_n <= base + 2u && hi_n <= UA_MAXF);
+    if (!ppm)                                           /* the pattern alone carries the I2S clock: hardly steered */
+        assert(adjs <= 60u);
+    {   /* the frames sent follow the frames made (at 48 kHz, x 160 / 147), within the ring */
+        int64_t want = r48 ? (int64_t)(made * 160u / 147u) : (int64_t)made, d = (int64_t)sent - want;
+        assert(d < (int64_t)UA_N && d > -(int64_t)UA_N);
+    }
+    uac.alt = 0;
+    usb.config = 0;
+    printf("USB audio pacing, %s, crystal %+d ppm: 60 s, %u..%u frames a packet, %u steered, none in a row: OK\n",
+           r48 ? "48 kHz" : "44.1 kHz", (int)ppm, (unsigned)lo_n, (unsigned)hi_n, (unsigned)adjs);
+}
+#endif
 #if UA_MC
 /* FELUCCA_UAC_CH: the stream's format and endpoint say the channels; a render's master and the app's channels come out
  * of the packets in order, frame for frame, across the ring's end and the indices' wrap (UA_WRAP) */
@@ -1218,6 +1283,18 @@ int main(void)
     test_descriptors();
 #if UA_MC
     test_uac_channels();
+#endif
+#if FELUCCA_UAC
+    {
+        static const int32_t PPM[3] = {0, 200, -200};
+        int i;
+        for (i = 0; i < 3; i++) {
+            test_uac_pace(0, PPM[i]);
+#if FELUCCA_UAC_48K
+            test_uac_pace(1, PPM[i]);
+#endif
+        }
+    }
 #endif
     usb_start();
     assert(usb.up && !usb.config);

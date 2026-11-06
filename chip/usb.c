@@ -219,6 +219,15 @@ _Static_assert(UA_HI48 + UA_REND48 + UA_MAXF < UA_N, "the ring holds the band, a
 #else
 #define UA_MAXF 46u              /* frames in the largest packet */
 #endif
+/* The packets follow the I2S clock (6 MHz / 136 = 44,117.647 Hz; resampled x 160 / 147 at 48 kHz, 48,019.21 Hz) as a
+ * steady pattern, as an asynchronous device's clock: 44 frames a ms and one more every ~8.5 ms (48 and one more
+ * every ~52 ms at 48 kHz). The ring's fill then steers what is left (the crystals' difference) by one frame a render
+ * at most. A host that follows the device's rate closely (iOS's Camera) fills a run of short packets with silence:
+ * steering every packet until the next render's measurement sent 5..6 short or long ones in a row (heard there as
+ * dropouts about once a second; macOS and Ableton Live took them) */
+#define UA_ACC_ONE 100000u
+#define UA_FRAC44 11765u
+#define UA_FRAC48 1921u
 #if UA_MC
 /* FELUCCA_UAC_CH channels: a frame is FELUCCA_UAC_CH 16-bit samples, as the packet carries them. The ring is the
  * smallest number of halves that holds the band, a render and a packet (FELUCCA_UAC_RING_FRAMES may give it more), so
@@ -261,7 +270,8 @@ static struct {
     uint8_t wait;                /* polls the queued packet has waited */
     uint8_t e0_rx;               /* SET_CUR sampling frequency: data stage pending */
     volatile uint32_t fill_min;  /* ring fill when the last render started */
-    uint32_t acc;                /* 44.1 frames per ms: 0.1 frame steps */
+    volatile uint8_t fresh;      /* fill_min measured since the last correction: one frame of steering a render */
+    uint32_t acc;                /* the I2S clock's frames a ms past the whole ones, in 1/UA_ACC_ONE frames */
     uint32_t last;               /* the last frame sent, repeated on an underrun */
     uint32_t starts, pkts, frames;               /* frames in packets sent from the ring */
     uint32_t underruns, overruns, missed;        /* glitches: ring empty (repeat), ring full (drop), no packet ready */
@@ -1768,6 +1778,7 @@ static __attribute__((noinline)) void uac_render_start(void)   /* audio ISR, bef
     }
     fill = ua_fill(ua_w, r);
     uac.fill_min = fill;
+    uac.fresh = 1;
     if (fill < uac.fill_lo)
         uac.fill_lo = fill;
     if (fill > uac.fill_hi)
@@ -1829,6 +1840,7 @@ static __attribute__((noinline)) void uac_render_start(void)   /* audio ISR, bef
     }
     fill = ua_w - ua_r;
     uac.fill_min = fill;
+    uac.fresh = 1;
     if (fill < uac.fill_lo)
         uac.fill_lo = fill;
     if (fill > uac.fill_hi)
@@ -1968,9 +1980,9 @@ static uint32_t uac_packet(uint32_t *dw)              /* as below, FELUCCA_UAC_C
 {
     int16_t *d = (int16_t *)dw;
     uint32_t n = 44u, r, fill, k, i, c;
-    uac.acc += UAC_RATE % 1000u;
-    if (uac.acc >= 1000u) {
-        uac.acc -= 1000u;
+    uac.acc += UA_FRAC44;                               /* the I2S clock's frames this ms (above) */
+    if (uac.acc >= UA_ACC_ONE) {
+        uac.acc -= UA_ACC_ONE;
         n++;
     }
     if (!uac.go) {
@@ -1978,10 +1990,12 @@ static uint32_t uac_packet(uint32_t *dw)              /* as below, FELUCCA_UAC_C
             d[i] = 0;
         return n;
     }
-    if (uac.fill_min > UA_HI) {
+    if (uac.fresh && uac.fill_min > UA_HI && n < UA_MAXF) {   /* the rest: one frame a render at most */
+        uac.fresh = 0;
         n++;
         uac.adj_up++;
-    } else if (uac.fill_min < UA_LO) {
+    } else if (uac.fresh && uac.fill_min < UA_LO) {
+        uac.fresh = 0;
         n--;
         uac.adj_down++;
     }
@@ -2018,30 +2032,31 @@ static uint32_t uac_packet(uint32_t *dw)              /* as below, FELUCCA_UAC_C
 #else
 static uint32_t uac_packet(uint32_t *d)
 {
-    uint32_t n = 44u, r, fill, k, i, lo = UA_LO, hi = UA_HI;
+    uint32_t n = 44u, r, fill, k, i, lo = UA_LO, hi = UA_HI, frac = UA_FRAC44;
 #if FELUCCA_UAC_48K
-    if (uac.r48) {                                      /* 48 frames a ms, no pattern */
+    if (uac.r48) {                                      /* 48 frames a ms and the I2S clock's 0.0192 */
         n = 48u;
         lo = UA_LO48;
         hi = UA_HI48;
-    } else
+        frac = UA_FRAC48;
+    }
 #endif
-    {
-        uac.acc += UAC_RATE % 1000u;
-        if (uac.acc >= 1000u) {
-            uac.acc -= 1000u;
-            n++;
-        }
+    uac.acc += frac;                                    /* the I2S clock's frames this ms (above) */
+    if (uac.acc >= UA_ACC_ONE) {
+        uac.acc -= UA_ACC_ONE;
+        n++;
     }
     if (!uac.go || uac.ring48 != uac.r48) {             /* not primed (at this rate) yet */
         for (i = 0; i < n; i++)
             d[i] = 0;
         return n;
     }
-    if (uac.fill_min > hi) {
+    if (uac.fresh && uac.fill_min > hi && n < UA_MAXF) {   /* the rest: one frame a render at most */
+        uac.fresh = 0;
         n++;
         uac.adj_up++;
-    } else if (uac.fill_min < lo) {
+    } else if (uac.fresh && uac.fill_min < lo) {
+        uac.fresh = 0;
         n--;
         uac.adj_down++;
     }
