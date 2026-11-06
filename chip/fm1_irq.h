@@ -16,6 +16,11 @@
  * fm1_crash_ctx keeps the registers of the last FM1_CRASH_CTX_N crashes beside
  * it (an entry is one of them when its count is within the last
  * FM1_CRASH_CTX_N of fm1_crash.count).
+ *
+ * One unit defines fm1_crash, fm1_crash_ctx and fm1_fault_c. A firmware of
+ * several units includes this header in the others with FM1_IRQ_DEFS 0, which
+ * leaves those definitions out and declares them, so another unit can use the
+ * helpers below (a radio driver, say) with its own flags.
  */
 #pragma once
 #include <stdint.h>
@@ -56,7 +61,15 @@ typedef struct {
 /* Not static: .noinit holds whatever the last run (or power-on) left, and a
  * file-local object would let the compiler assume its zero initial value and
  * fold the magic check away. */
+#ifndef FM1_IRQ_DEFS
+#define FM1_IRQ_DEFS 1
+#endif
+
+#if FM1_IRQ_DEFS
 fm1_crash_t fm1_crash __attribute__((section(".noinit")));
+#else
+extern fm1_crash_t fm1_crash;
+#endif
 
 /* the registers at the last crashes, the oldest overwritten: which register held what when the CPU faulted (a
  * pointer one bit off with the memory it came from intact, sp a word off). count is the crash's fm1_crash.count */
@@ -66,10 +79,16 @@ fm1_crash_t fm1_crash __attribute__((section(".noinit")));
 typedef struct {
     uint32_t count, pc, r[16], usp, ssp;
 } fm1_crash_ctx_t;
+#if FM1_IRQ_DEFS
 fm1_crash_ctx_t fm1_crash_ctx[FM1_CRASH_CTX_N] __attribute__((section(".noinit")));
+#else
+extern fm1_crash_ctx_t fm1_crash_ctx[FM1_CRASH_CTX_N];
+#endif
 
 extern const char fm1_fatal_stubs[];
+#if FM1_IRQ_DEFS
 static void fm1_fault(const fm1_crash_t *c);   /* application: report, then reset */
+#endif
 
 static void fm1_irq_init(void)
 {
@@ -108,6 +127,7 @@ static void fm1_irq_enable_all(void)
     fm1_irq_on();
 }
 
+#if FM1_IRQ_DEFS
 #if FM1_CPU1
 static int fm1_cpu1_fault_c(const uint32_t *f);   /* fm1_cpu1.h: 1 = the second core's fault, handled */
 #endif
@@ -155,3 +175,6 @@ void fm1_fault_c(uint32_t *f)
     for (;;)
         ;
 }
+#else
+void fm1_fault_c(uint32_t *f);
+#endif
