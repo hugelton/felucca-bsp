@@ -20,11 +20,13 @@
 #include "fm1_time.h"
 #include "fm1_sys.h"
 /* the loader may write the app area and clear update records (program over one, or erase its own staging); never
- * the head, nor Felucca's store [0x97000, 0xE0000) (user data, never a record: ldr_core.c), but for the sectors of an
- * app's resource region while ldr_core.c writes them (ldr_res_window: in RAM, as the whole loader) */
+ * the head, nor Felucca's store [FL_DATA_LO, 0xE0000) (user data, never a record: ldr_core.c), but for the sectors of an
+ * app's resource region while ldr_core.c writes them, and for the sectors a change of slot erases (LDR_SLOT_SWITCH,
+ * ldr_core.c ldr_slot_switch: the old app's code above this one's end, or a bigger slot's LDR_CLEAR_END data), each only
+ * while its window is open (ldr_res_window: in RAM, as the whole loader) */
 static uint32_t ldr_res_lo, ldr_res_hi;
-#define FL_RANGE_OK(off, n) (FL_IN(off, n, 0x4000u, 0x97000u) || FL_IN(off, n, 0xE0000u, 0xFC000u) || \
-                             (ldr_res_hi && FL_IN(off, n, ldr_res_lo, ldr_res_hi)))
+#include "ldr_range.h"
+#define FL_RANGE_OK(off, n) LDR_RANGE_OK(off, n, ldr_res_lo, ldr_res_hi)
 #include "fm1_flash.h"
 #include "../chip/libc.c"
 #include "../chip/usb.c"
