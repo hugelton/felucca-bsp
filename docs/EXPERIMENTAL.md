@@ -1,8 +1,9 @@
 # Experimental features
 
 Status of the advanced features planned for this repository. **Beta**: the second core (runs in Melodee;
-this version not yet on a device), expanded flash (code exists, never run on a device), the cache RAM (code and a
-host test; Optimist's own copy runs on an FM-1), and USB MIDI host
+this version not yet on a device), expanded flash (code exists, never run on a device), the sliced sector erase
+(code and a host test, never run on a device), the cache RAM (code and a host test; Optimist's own copy runs on an
+FM-1), and USB MIDI host
 (input runs in Melodee; this BSP port and output need device validation). **Concept**: the clock (nothing runs).
 Each item says what is established, what is guessed, and what the first bench test is. All of it stays behind
 explicit calls: no firmware starts any of it by itself.
@@ -28,6 +29,24 @@ regions up to 16 MiB ([configuration](FLASH.md#replacement-flash-parts)); JEDEC 
 widen write permissions. Not done: hardware qualification and 4-byte addressing above 16 MiB.
 Unknown: how much flash the XIP window maps, the quad-enable bit of other vendors' parts. First test: read the
 JEDEC id of a swapped part and check that the stock layout still boots.
+
+## Sliced sector erase: `chip/fm1_flash_slice.h`, `fl_erase4k_sliced` in `chip/fm1_flash.h`
+
+From Optimist (hdavid, under MPL-2.0: `LICENSING.md`), behind `FL_ERASE_SLICED 1`. A 4 KiB erase holds the interrupts
+off for the whole erase (P25Q80H tSE 8 ms typical, 12 ms max; 17 ms measured on an FM-1), longer than an audio half
+(5.8 ms at 256 frames), so the caller silences the buffer first and a save is heard. The sliced erase suspends the
+erase (75h) after 1 ms, turns the interrupts on with the XIP back for 20 us, and resumes it (7Ah) in the next window:
+the longest window is about 1 ms. Done: the logic on a model of the part (`tests/flash_slice_test.c`: the longest
+window, the sector always ends erased and never suspended; a part that ignores the suspend, shows no SUS bit,
+suspends late, loses its progress, never gets ready). A part that does not suspend falls back to one window (silenced,
+`FL_ERASE_HELD()`); an erase that went through a suspend is read back blank, else erased again in one window.
+Not established: the P25Q80H's suspend on an FM-1 (no firmware with this file has run on a device); other parts'
+suspend (75h / 7Ah is the common pair, not universal). The fm1-emulator has no model of an erase suspend: build such
+a firmware with `FL_ERASE_SLICED 0` for it. Rules for the caller: from the main loop only (the interrupts go on
+between windows); with a second core, no job of it outstanding (the XIP is off in each window, as for a page
+program). First test: a firmware that erases a data sector while it plays a held note, with the longest
+interrupts-off window measured (TIMER4 around `irq_save` / `irq_restore`, or `FM1_FLASH_ENTER` / `FM1_FLASH_LEAVE`):
+about 1 ms, the note unbroken, `FL_ERASE_HELD()` never called, the sector blank.
 
 ## Cache RAM: `chip/fm1_cache_ram.h`
 

@@ -31,6 +31,16 @@ Kerem Kilic (Ellic Studio) also licenses his output, recovery, tests and BSP int
 under MPL-2.0. Both authors are credited in the files; exact source revisions are in
 `NOTICE`. This permission applies to these contributions, not to the rest of Melodee.
 
+## The sliced sector erase
+
+`chip/fm1_flash_slice.h`, `tests/flash_slice_test.c` and the sliced erase's glue in `chip/fm1_flash.h` and `chip/fm1_flash_api.h`
+(`fl_erase_window_ram`, `fl_erase_window`, `fl_blank_xip`, `fl_erase4k_sliced`, the `FL_ERASE_HELD`,
+`FM1_FLASH_ENTER` and `FM1_FLASH_LEAVE` hooks) come from Optimist (https://github.com/w0ts/optimist,
+`firmware/hal/fm1_flash_slice.h`, `tests/flash_slice_test.c`, `firmware/hal/fm1_flash.h`), written by hdavid, who offers
+them there under GPL-3.0-only OR MPL-2.0 (Optimist commit 25b17fc7, its LICENSING.md, "The sliced sector erase").
+They are taken here under MPL-2.0. The rest of Optimist's `fm1_flash.h` is not: the primitives they run on are this
+repository's own.
+
 ## Forks of Felucca
 
 Using this repository does not relicense a fork of Felucca. A fork still contains Felucca's code, which is
