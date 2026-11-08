@@ -36,6 +36,7 @@ belong to their owners.
 | --- | --- |
 | M-VAVE FM-1 | Supported. Used by Felucca. |
 | M-VAVE Galaxia | Supported (board code: audio, knobs, switches, jacks, LED). Used by [GalaxiaSDK](https://github.com/dhilowitz/GalaxiaSDK). |
+| M-VAVE Pocket AMP | Board code for audio, buttons and panel, checked on a unit. Used by [Pendel](https://github.com/hugelton/Pendel); its update loader stays in pendel-bsp. |
 | M-VAVE SMK-37 Elite | Planned. Not started. |
 | M-VAVE SMK-37 Pro | Planned. No board support yet. |
 
@@ -54,6 +55,7 @@ when they have been checked on a real unit.
 | `loader/` | The update loader (builds as a RAM image; it includes `chip/usb.c`, `chip/ota.c` and `chip/libc.c`) |
 | `boards/fm1/` | FM-1 wiring and drivers: ST7789 panel initialization and RGB565 transfers (`fm1_lcd.h`), key scan (with velocity and pressure from the keys, off by default: `fm1_input.h`), ADC channels, checked stereo Q23 audio DMA (`fm1_audio.h`), the headphone jack's switch (PB5: `fm1_jack.h`) |
 | `boards/galaxia/` | Galaxia (a guitar pedal, board PD49 V03) wiring and drivers in one header, `gx_board.h`: the stereo converter on ALNK0 (44,118 Hz), six knobs including a nine-detent selector, two footswitches, the input jack detects, the two-colour LED |
+| `boards/pocketamp/` | Pocket AMP audio input/output, buttons and panel. The board-specific update loader remains in [pendel-bsp](https://github.com/hugelton/pendel-bsp). |
 | `docs/BOARD_IO.md` | Panel API, pixel byte order and lifetime; audio sample/rate guarantees, buffer validation, stop/restart and underrun behavior |
 | `docs/EXPERIMENTAL.md` | Second core, expanded flash, USB host, clock: what is established and what is not |
 | `docs/FLASH.md` | Application write regions, flash API, interrupt preservation, CPU1 coordination and verification |
