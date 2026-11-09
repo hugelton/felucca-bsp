@@ -44,6 +44,11 @@ static int uh_parse_midi(const uint8_t *d, uint32_t len, uh_midi_t *m)
         } else if (d[i + 1] == 5u && l >= 7u && in_midi) {
             uint8_t ea = d[i + 2], type = d[i + 3] & 3u;
             uint16_t mps = (uint16_t)(d[i + 4] | d[i + 5] << 8);
+            /* A bulk endpoint declaring a high-speed size (128..512) at full speed: 64 (the most a full-speed bulk
+             * packet holds on the wire). Elektron's Digitone II answers a full-speed host with its high-speed
+             * descriptor (512) and stalls the device qualifier: "NO MIDI" before (the user, 2026-11-09) */
+            if (type == 2u && (mps == 128u || mps == 256u || mps == 512u))
+                mps = 64u;
             /* Full-speed USB-MIDI 1.0 events are four bytes. The buffers hold at most 64 bytes. */
             if ((ea & 15u) && !(ea & 0x70u) && mps >= 4u && mps <= 64u &&
                 ((type == 2u && (mps == 8u || mps == 16u || mps == 32u || mps == 64u)) ||
