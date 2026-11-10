@@ -8,7 +8,9 @@
  *     never flushed and nothing more is sent until the host takes the packet in it;
  *   - a SysEx answer queued meanwhile is kept, and goes out first when the host reads again;
  *   - when the host reads again, the next packet goes out at once with only what was queued since (no stale burst);
- *   - a bus reset in between leaves nothing behind either. */
+ *   - a bus reset in between leaves nothing behind either;
+ *   - the real-time ring (FELUCCA_MIDI_RT, usb_midi_rt) is dropped with it: after the stall no clock tick waits, with
+ *     notes queued or with ticks alone, and the first packet after the host reads again carries none. */
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -66,6 +68,7 @@ static void fm1_delay_ms(uint32_t ms) { (void)ms; }
 #define FELUCCA_UAC 0
 #define FELUCCA_CDC 0
 #define FELUCCA_USB_HOST 0
+#define FELUCCA_MIDI_RT 1
 #define HALF_FRAMES 128u
 static volatile uint32_t render_peak;
 static volatile uint8_t render_busy;
@@ -131,6 +134,34 @@ int main(void)
     mo_r = mo_w;                                       /* (as usb_poll's bus reset does) */
     host_reads = 1; fifo_full = 0; poll();
     assert(mo_w == mo_r);
+
+    /* 5. real-time ticks: the stall drops them too (the ring is not left to burst when the host reads again) */
+    usb.up = 1;
+    host_reads = 0;
+    last_n = 0;
+    assert(midi_out_try(note(6000)));
+    poll();                                             /* (into the FIFO, which stays full) */
+    assert(fifo_full);
+    for (k = 0; k < FELUCCA_MIDI_TX_STALL_POLLS + 2u; k++) { (void)usb_midi_rt(0xF8u << 8 | 0x0Fu); (void)midi_out_try(note(6100 + k)); poll(); }
+    assert(tx_deaf && rt_qr == rt_qw && mo_w == mo_r);
+    for (k = 0; k < 20u; k++) { (void)usb_midi_rt(0xF8u << 8 | 0x0Fu); poll(); assert(rt_qw - rt_qr <= 1u); }
+    assert(rt_qr == rt_qw);                             /* (after N polls nobody reading: no tick left) */
+    host_reads = 1; fifo_full = 0; last_n = 0;
+    assert(midi_out_try(note(6500)));
+    usb_midi_rt_kick();
+    poll();
+    assert(last_n == 4u && (last_pkt[2] & 0x7Fu) == (6500u & 0x7Fu) && rt_qr == rt_qw);   /* (no tick in the first packet) */
+    /* ticks alone (no note in midi_out_q) are dropped the same way */
+    host_reads = 0; fifo_full = 0; last_n = 0;
+    assert(usb_midi_rt(0xF8u << 8 | 0x0Fu));            /* (into the FIFO: nothing pending) */
+    assert(fifo_full);
+    for (k = 0; k < FELUCCA_MIDI_TX_STALL_POLLS + 2u; k++) { (void)usb_midi_rt(0xF8u << 8 | 0x0Fu); poll(); }
+    assert(tx_deaf && rt_qr == rt_qw);
+    host_reads = 1; fifo_full = 0; last_n = 0;
+    usb_midi_rt_kick();
+    poll();
+    assert(last_n == 0u && rt_qr == rt_qw);             /* (nothing stale goes out) */
+    assert(usb_midi_rt(0xFAu << 8 | 0x0Fu) && last_n == 4u);   /* (and a fresh tick goes at once) */
 
     printf("midi tx drop: OK (stall %u polls)\n", (unsigned)FELUCCA_MIDI_TX_STALL_POLLS);
     return 0;
