@@ -10,7 +10,8 @@
  *
  *   fm1_input_init();
  *   polled:  for (;;) { fm1_input_scan(); ... }
- *   IRQ:     call fm1_input_tick() from a ~10 kHz timer ISR; it advances one
+ *   IRQ:     call fm1_input_tick() from a timer ISR at FM1_INPUT_HZ (10 kHz; see the
+ *            constants below for the slower rates); it advances one
  *            column per call (stock-style pipeline: rows are sampled one tick
  *            after the column was latched, the LEDs stay lit in between), debounces
  *            that column's keys at once and the encoders every FM1_NCOL ticks
@@ -21,8 +22,8 @@
  * fm1_input_scan() runs one full frame (11 columns, ~0.6 ms) and calls
  * FM1_INPUT_IDLE() while it waits.
  * Keys/buttons: asymmetric debounce. A press counts after FM1_DEB_PRESS frames closed in a row
- * (1.1-2.2 ms from the contact with the TIMER5 scan): the matrix has diodes and no ghosting, so a closed sample is a
- * closed key; two in a row keep one stray sample from playing a note. A release needs
+ * (1.1-2.2 ms from the contact with the TIMER5 scan at 10 kHz): the matrix has diodes and no ghosting, so a closed
+ * sample is a closed key; two in a row keep one stray sample from playing a note. A release needs
  * FM1_DEB_RELEASE frames open in a row (~9 ms): a contact bouncing open on the way down, or
  * chattering on the way up, never ends the note early or plays it twice. A key still bouncing
  * when it is let go (open, closed, open..) holds its note until it has been open for that long.
@@ -133,34 +134,85 @@
 #ifndef FM1_LED_US
 #define FM1_LED_US 40u           /* LED on-time per column (brightness vs scan rate) */
 #endif
-#define FM1_DEB_PRESS 2u          /* frames closed in a row: a press (a frame = 11 ticks, ~1.1 ms) */
-#define FM1_DEB_RELEASE 8u        /* frames open in a row: a release (~9 ms) */
+#define FM1_NCOL 11u
+/* The tick's rate (fm1_input_tick, one column a tick; fm1-base's fm1.toml input_hz): 10000 (the default), 5000, 2000
+ * or 1000 a second. Everything below that counts ticks or frames is derived from it: what is a time keeps its time
+ * (the release debounce ~9 ms, the encoder's ~22 ms and ~1 s, the breath ~1.1 s, the battery's ~0.2 s, the power-on
+ * sweep ~0.7 s), what is a count of samples keeps its count where it can. At 10000 every value is what it was before
+ * the rate could change. A slower tick frees core 0 (the scan's GPIO work, ~7.5 % of it at 10 kHz, goes with the
+ * rate) and costs:
+ *   rate    tick   frame (LED refresh)  press (debounce)        release        knob, every step kept: turned, a flick
+ *   10000   0.1    1.1 ms   909 Hz      1.1-2.2 ms (2 frames)   8.8 ms (8)     ~225 clicks/s, ~450
+ *    5000   0.2    2.2 ms   455 Hz      2.2-4.4 ms (2)          8.8 ms (4)     ~113, ~225
+ *    2000   0.5    5.5 ms   182 Hz      0-5.5 ms (1)            11 ms (2)      ~45, ~90
+ *    1000   1      11 ms     91 Hz      0-11 ms (1)             22 ms (2)      ~23, ~45
+ * (the knob: input_rate_test, its transitions evenly spaced; a real knob's come bunched, so somewhat fewer; past
+ * them steps are lost, and from three transitions a frame, 3/4 of a click, they can count backwards).
+ * The press: two frames in a row while a frame is at most 2.2 ms (one stray closed sample plays nothing); one frame
+ * from 2000 down (a second would add a whole 5.5 / 11 ms to every note; a closed sample is a closed key on this
+ * diode matrix, and a stray one, a key brushed for less than a frame, is caught 1 time in frame / its length). The
+ * release: never under two frames (one open sample, a bounce or a chatter, never ends a note; 11 ms and more is
+ * past any bounce, so a key let go is never pressed again by its bounce either). The LEDs: a lit LED is lit one
+ * tick a frame at every rate (the same brightness), refreshed at the frame rate. The glow's pulse is a fixed time a
+ * frame, so it is longer at the slower rates for the same look, up to FM1_LED_DIM_MAX_NS (past it the tick would
+ * wait): ~1/31 of lit at 10000, ~1/50 at 5000, ~1/125 at 2000, ~1/250 at 1000 (DIM LO half that). The mid level
+ * (1 frame in N) keeps its ~114 Hz (DIM LO ~76 Hz) with a smaller N, so it is brighter: 5000 N 4 and 6 (25 and 17 %
+ * of lit, 114 and 76 Hz), 2000 2 and 3 (50 and 33 %, 91 and 61 Hz), 1000 2 and 3 (45 and 30 Hz: it flickers). The
+ * breath's lit frames and the power-on sweep's come at the frame rate: near its peak the breath has dark runs of up
+ * to 2 frames (input_rate_test: 303 Hz at 10000, 152 at 5000, 61 at 2000, 30 at 1000: it flickers at 2000 and 1000),
+ * its low end and the sweep's faint tail a lit frame every 10..40 (55..220 ms at 2000: they blink), and at 1000 a lit
+ * LED shows a trail when the eye moves. The analog rows (velocity, pressure) are read every two frames (2.2, 4.4, 11,
+ * 22 ms), the MASTER pot every two or three */
+#ifndef FM1_INPUT_HZ
+#define FM1_INPUT_HZ 10000u
+#endif
+#if FM1_INPUT_HZ < 1000 || FM1_INPUT_HZ > 10000 || 1000000 % FM1_INPUT_HZ != 0
+#error "FM1_INPUT_HZ: 1000 .. 10000 ticks a second, a whole number of microseconds a tick (10000, 5000, 2000, 1000)"
+#endif
+#define FM1_TICK_US (1000000u / (FM1_INPUT_HZ))          /* 100, 200, 500, 1000 */
+#define FM1_FRAME_US (FM1_NCOL * FM1_TICK_US)             /* 1100, 2200, 5500, 11000 */
+#define FM1__FRAMES(us) (((us) + FM1_FRAME_US / 2u) / FM1_FRAME_US)   /* a time in frames, rounded */
+#define FM1__MAX(a, b) ((a) > (b) ? (a) : (b))
+#ifndef FM1_DEB_PRESS
+#define FM1_DEB_PRESS (FM1_FRAME_US <= 2200u ? 2u : 1u)   /* frames closed in a row: a press (see above) */
+#endif
+#ifndef FM1_DEB_RELEASE
+#define FM1_DEB_RELEASE FM1__MAX(FM1__FRAMES(8800u), 2u)  /* frames open in a row: a release (~9 ms; 8 at 10 kHz) */
+#endif
 #define FM1_INPUT_LAT 1           /* the press latency stats below (seq.c, console `inp`) */
 #define FM1_SETTLE_US 10u
+#ifndef FM1_LED_DIM_MAX_NS
+#define FM1_LED_DIM_MAX_NS 4000u  /* the longest: past it the shift is shorter than the pulse and the tick waits */
+#endif
+#define FM1__DIM_NS (32u * FM1_TICK_US < FM1_LED_DIM_MAX_NS ? 32u * FM1_TICK_US : FM1_LED_DIM_MAX_NS)   /* (3200 at 10 kHz) */
 #ifndef FM1_LED_DIM_NS
-#define FM1_LED_DIM_NS 3200u      /* a dim LED's pulse per frame (ns; a lit one ~95 us): ~1/30 the brightness */
+#define FM1_LED_DIM_NS FM1__DIM_NS          /* a dim LED's pulse per frame (ns; a lit one ~95 us): ~1/30 the brightness */
 #endif
 #ifndef FM1_LED_DIM_LO_NS
-#define FM1_LED_DIM_LO_NS 1600u   /* the darker glow (MENU > LEDS DIM LO): ~1/60 */
+#define FM1_LED_DIM_LO_NS (FM1__DIM_NS / 2u)   /* the darker glow (MENU > LEDS DIM LO): ~1/60 (1600 at 10 kHz) */
 #endif
 #ifndef FM1_LED_DIM_DIV
 #define FM1_LED_DIM_DIV 1u        /* a dim LED: the pulse on 1 frame in DIV (1: every frame, ~910 Hz) */
 #endif
-#define FM1_LED_BREATH_FRAMES 1024u   /* a breath: frames dark -> the peak -> dark (~1.13 s; a power of 2) */
+#ifndef FM1_LED_BREATH_FRAMES     /* a breath: frames dark -> the peak -> dark (~1.13 s; a power of 2: the nearest) */
+#define FM1_LED_BREATH_FRAMES (FM1_FRAME_US < 1555u ? 1024u : FM1_FRAME_US < 3110u ? 512u : \
+                               FM1_FRAME_US < 6220u ? 256u : 128u)
+#endif
 #ifndef FM1_LED_BREATH_PK
 #define FM1_LED_BREATH_PK 154u        /* the breath's peak, /256 of lit: ~60 % (DIM HI, OFF, INV) */
 #endif
 #ifndef FM1_LED_BREATH_PK_LO
 #define FM1_LED_BREATH_PK_LO 77u      /* with DIM LO: ~30 % */
 #endif
+#define FM1__MID_N FM1__MAX((800u + FM1_TICK_US / 2u) / FM1_TICK_US, 2u)
 #ifndef FM1_LED_MID_N
-#define FM1_LED_MID_N 8u              /* the steady mid level: lit 1 frame in N (DIM HI, OFF, INV) */
+#define FM1_LED_MID_N FM1__MID_N      /* the steady mid level: lit 1 frame in N (DIM HI, OFF, INV): 8 at 10 kHz, ~114 Hz */
 #endif
-#ifndef FM1_LED_MID_N_LO
-#define FM1_LED_MID_N_LO 12u          /* with DIM LO */
+#ifndef FM1_LED_MID_N_LO              /* with DIM LO: 12 at 10 kHz, ~76 Hz */
+#define FM1_LED_MID_N_LO FM1__MAX((1200u + FM1_TICK_US / 2u) / FM1_TICK_US, FM1__MID_N + 1u)
 #endif
 #ifndef FM1_LED_TICK_US
-#define FM1_LED_TICK_US 100u          /* fm1_input_tick's period (TIMER5, 10 kHz): a lit LED's time a frame */
+#define FM1_LED_TICK_US FM1_TICK_US   /* fm1_input_tick's period (TIMER5, 10 kHz: 100): a lit LED's time a frame */
 #endif
 #ifndef FM1_LED_TRACE
 #define FM1_LED_TRACE(rowmask) ((void)0)   /* input_test.c: every write of the LED lines */
@@ -168,9 +220,9 @@
 #ifndef FM1_SR_LATCH_TRACE
 #define FM1_SR_LATCH_TRACE() ((void)0)     /* input_test.c: the 595 latch */
 #endif
-#define FM1_REST_FRAMES 900u      /* ~1 s still off the detent state: that is the detent (power-on) */
-#define FM1_ENC_GO 20u            /* a 2-state jump from the detent goes on the way of a click this recent (~22 ms) */
-#define FM1_NCOL 11u
+#define FM1_REST_FRAMES FM1__FRAMES(990000u)   /* ~1 s still off the detent state: that is the detent (power-on; 900) */
+#define FM1_ENC_GO FM1__MAX(FM1__FRAMES(22000u), 3u)   /* a 2-state jump from the detent goes on the way of a click this
+                                                         * recent (~22 ms: 20 frames at 10 kHz; at least 3) */
 #define FM1_NKEY 41u              /* ids: 0..13 buttons, 14..40 note keys */
 #define FM1_NENC 7u
 
@@ -215,8 +267,8 @@ static uint8_t fm1_led_mid[FM1_NCOL];      /* a steady mid level (see top): lit 
 #ifndef FM1_INPUT_LED_OK
 #define FM1_INPUT_LED_OK(col, rowbit) 1
 #endif
-#ifndef FM1_BATT_EVERY
-#define FM1_BATT_EVERY 64u       /* the pot's slots per battery reading (one slot each ~3.3 ms: ~0.2 s) */
+#ifndef FM1_BATT_EVERY               /* the pot's slots per battery reading (one slot each 2 or 3 frames: ~0.2 s; 64) */
+#define FM1_BATT_EVERY FM1__MAX((6400u + FM1_TICK_US / 2u) / FM1_TICK_US, 1u)
 #endif
 static volatile struct {
     uint16_t con;                /* the conversion's clock / start delay (FM1_ADC_CON); 0 = analog off */
@@ -235,7 +287,7 @@ static volatile struct {
 
 /* scan diagnostics (console `inp`, read and cleared by the main loop): the gap between ticks
  * = the on-time of the column lit in it, in TIMER4 ticks (24 MHz) */
-#define FM1_GAP_BINS 8u                /* < 0.15, 0.3, 0.6, 1.2, 2.4, 4.8, 9.6 ms, longer */
+#define FM1_GAP_BINS 8u                /* < 1.5, 3, 6, 12, 24, 48, 96 ticks, longer (10 kHz: < 0.15 .. 9.6 ms) */
 static volatile struct {
     uint32_t last, gap_max, gap_hist[FM1_GAP_BINS];
     uint32_t on[FM1_NCOL], on_max[FM1_NCOL];
@@ -574,9 +626,6 @@ static void fm1_led_dim_level(uint32_t lo)
 #ifndef FM1_LED_DIM_MIN_NS
 #define FM1_LED_DIM_MIN_NS 500u   /* the shortest pulse asked for: about one line write and a few bits of the shift */
 #endif
-#ifndef FM1_LED_DIM_MAX_NS
-#define FM1_LED_DIM_MAX_NS 4000u  /* the longest: past it the shift is shorter than the pulse and the tick waits */
-#endif
 static void fm1_led_dim_ns(uint32_t ns)
 {
     ns = ns < FM1_LED_DIM_MIN_NS ? FM1_LED_DIM_MIN_NS : ns > FM1_LED_DIM_MAX_NS ? FM1_LED_DIM_MAX_NS : ns;
@@ -624,6 +673,7 @@ static void fm1__breath_frame(void)               /* (a new frame, before column
  * (the frame wraps at FM1_IDLE_FRAMES): a key or a button down ends it before its frame is drawn (the LEDs as the
  * last frame left them, for the UI to take over), so does fm1_led_anim_stop (the main loop: a knob turned, the
  * transport started) */
+#define FM1_ANIM_STEP FM1__MAX((FM1_TICK_US + 50u) / 100u, 1u)   /* the sweep's frames (1.1 ms, fm1_led_anim.h) a frame */
 static uint16_t fm1__an_f;
 static uint8_t fm1__an_glow, fm1__an_idle, fm1__an_cb[FM1_NKEY], fm1__an_acc[FM1_NKEY];   /* each LED: column << 3 | row,
                                                                                             * its sigma-delta */
@@ -651,13 +701,13 @@ static __attribute__((noinline)) void fm1__anim_frame(void)
         fm1__an_acc[i] = (uint8_t)a;
     }
     if (idle)                                      /* (endless: the frame wraps) */
-        f = (f + 1u) & (FM1_IDLE_FRAMES - 1u);
+        f = (f + FM1_ANIM_STEP) & (FM1_IDLE_FRAMES - 1u);
     for (i = 0; i < FM1_NCOL; i++) {
         fm1_led_dim[i] = d[i];
         fm1_led[i] = !idle && f >= FM1_ANIM_FRAMES ? 0u : l[i];
     }
-    fm1__an_f = (uint16_t)(idle ? f + 1u : f >= FM1_ANIM_FRAMES ? 0u : f + 2u);   /* (the sweep's last picture stays for
-                                                                                   * the UI to take over) */
+    fm1__an_f = (uint16_t)(idle ? f + 1u : f >= FM1_ANIM_FRAMES ? 0u : f + 1u + FM1_ANIM_STEP);   /* (the sweep's last
+                                                                                   * picture stays for the UI to take over) */
     fm1__led_lines(FM1__LIT(0u));                  /* column 0, lit a moment ago with the last frame's: this one's */
 }
 /* start the sweep (main loop, before the scan runs or with it): `glow` the idle glow is on (MENU > LEDS DIM HI / LO);
@@ -695,7 +745,7 @@ static void fm1_input_tick(void)
         fm1__an_take();
     fm1__led_lines(0);
     fm1_in_stat.last = t0;
-    while (b < FM1_GAP_BINS - 1u && g >= (150u * FM1_TICKS_PER_US << b))
+    while (b < FM1_GAP_BINS - 1u && g >= (FM1_TICK_US * 3u / 2u * FM1_TICKS_PER_US << b))
         b++;
     fm1_in_stat.gap_hist[b]++;
     if (g > fm1_in_stat.gap_max)

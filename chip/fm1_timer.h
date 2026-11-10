@@ -6,6 +6,8 @@
  *
  *   fm1_timer5_start(isr, prio)   OSC /4 = 6 MHz, PRD 600 -> 10 kHz, IRQ 63
  *   fm1_timer5_ack()              first thing in the ISR
+ * The period: FM1_T5_PERIOD (6 MHz ticks), or else 6 MHz / FM1_INPUT_HZ (the
+ * input scan's rate, boards/fm1/fm1_input.h: 1200 at 5000, 3000 at 2000), else 600.
  */
 #pragma once
 #include <stdint.h>
@@ -15,12 +17,19 @@
 #define FM1_T5_CON (*(volatile uint32_t *)0x10900u)
 #define FM1_T5_CNT (*(volatile uint32_t *)0x10904u)
 #define FM1_T5_PRD (*(volatile uint32_t *)0x10908u)
+#ifndef FM1_T5_PERIOD
+#ifdef FM1_INPUT_HZ
+#define FM1_T5_PERIOD (6000000u / (FM1_INPUT_HZ))
+#else
+#define FM1_T5_PERIOD 600u                 /* 6 MHz / 600: 10 kHz */
+#endif
+#endif
 
 FM1_INLINE void fm1_timer5_start(void (*isr)(void), uint32_t prio)   /* IRQs off */
 {
     FM1_T5_CON = 0x4000u;
     FM1_T5_CNT = 0;
-    FM1_T5_PRD = 600u;
+    FM1_T5_PRD = FM1_T5_PERIOD;
     fm1_irq_attach(FM1_IRQ_TIMER5, isr, prio);
     FM1_T5_CON = 0x4019u;
 }
