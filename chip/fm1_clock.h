@@ -83,3 +83,43 @@ static inline int fm1_clock_stock(void)
     FL_FAR(fm1_clock_set_stock_ram)();
     return fm1_clock_is_stock() ? 1 : -1;
 }
+
+/* Another PLL1 multiplier, by the same steps: 24 / 12 * mul MHz, the system clock 2/3 of it (270: the stock 360 MHz;
+ * 297: 396 MHz, JieLi's top, which its SDK marks not for mass production). HSB /2 and LSB /3 follow (198 / 66 MHz at
+ * 297: the LCD's SPI and the UARTs' dividers 10 % faster), the flash's serial clock with HSB; the audio PLL (PLL0) is
+ * not touched. Interrupts off around it, as fm1_clock_stock. A soft reset keeps the PLL: a firmware that raises it
+ * calls fm1_clock_restore before its resets and its update loader (fm1-base does), so nothing starts above stock. Not
+ * in fm1_sys.h: the update loader includes that, and fm1_flash.h here would change its flash checks */
+static RAMFN void fm1_clock_pll1_ram(uint32_t mul)
+{
+    CLK_MUX_CON &= ~(1u << 8);
+    __asm__ volatile("csync" ::: "memory");
+    fm1_clock_wait_us(20);
+    CLK_PLL1_CON0 = CLK_STOCK_PLL0 & ~3u;
+    CLK_PLL1_CON1 = (CLK_STOCK_PLL1 & ~0xFFFu) | (mul - 2u);
+    CLK_PLL1_CON0 |= 1u;
+    fm1_clock_wait_us(100);
+    CLK_PLL1_CON0 |= 2u;
+    fm1_clock_wait_us(900);
+    CLK_SYS_CON = (CLK_SYS_CON & ~0xFFu) | CLK_STOCK_SYS;
+    CLK_HSB_CON = (CLK_HSB_CON & ~0x30700u) | CLK_STOCK_HSB;
+    CLK_MUX_CON |= (1u << 6) | (1u << 7);
+    CLK_MUX_CON |= (1u << 8);
+    __asm__ volatile("csync" ::: "memory");
+    fm1_clock_wait_us(20);
+}
+static inline void fm1_clock_pll1(uint32_t mul) { FL_FAR(fm1_clock_pll1_ram)(mul); }
+/* (before a reset) PLL1 back to the stock multiplier if it was changed; nothing otherwise */
+static inline void fm1_clock_restore(void)
+{
+    if ((CLK_PLL1_CON1 & 0xFFFu) != (CLK_STOCK_PLL1 & 0xFFFu) && (CLK_PLL1_CON0 & 3u) == 3u)
+        fm1_clock_pll1((CLK_STOCK_PLL1 & 0xFFFu) + 2u);
+}
+/* the system clock in kHz when it runs on PLL1 * 2/3 as the stock setup does (any multiplier), else 0 (unknown) */
+static inline uint32_t fm1_clock_khz(void)
+{
+    if ((CLK_SYS_CON & 0xFFu) != CLK_STOCK_SYS || !(CLK_MUX_CON & (1u << 8)) || (CLK_PLL1_CON0 & ~0x7Cu) != (CLK_STOCK_PLL0 & ~0x7Cu)
+        || (((CLK_PLL1_CON0 >> 2) & 31u) + 2u) != 12u)
+        return 0;
+    return 24000u / 12u * ((CLK_PLL1_CON1 & 0xFFFu) + 2u) * 2u / 3u;
+}
