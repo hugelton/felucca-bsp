@@ -357,6 +357,9 @@ static void fm1_delay_ms(uint32_t ms) { (void)ms; }
 #define FELUCCA_OTA 0
 #define FELUCCA_USB_HOST TEST_HOST
 #define FELUCCA_UAC_48K TEST_48K
+static uint64_t pace_t, pace_tick_num = 1u, pace_tick_den = 2500u;   /* test_uac_pace's time and crystal */
+static uint32_t pace_clock(void) { return (uint32_t)(pace_t * pace_tick_num / pace_tick_den); }
+#define FELUCCA_UAC_CLOCK() pace_clock()
 #define FELUCCA_UAC_OUT TEST_OUT
 #define HALF_FRAMES 128u
 static volatile uint32_t render_peak;
@@ -1154,20 +1157,35 @@ int main(void)
 
 #else
 #if FELUCCA_UAC
-/* The packets' pacing: renders of HALF_FRAMES on the FM-1's I2S clock (6 MHz / 136, its crystal ppm off), a packet a
- * ms on the host's. The stream must hold (no underrun, no overrun), carry the I2S clock's frames, and never steer two
- * packets in a row: a host that follows an asynchronous device's rate closely (iOS's Camera) filled the 5..6 short
- * packets of the old steering with silence. Time in 1/60 GHz: a ms is 60,000,000, a render 174,080,000 */
-static void test_uac_pace(int r48, int32_t ppm)
+/* The packets' pacing: renders of HALF_FRAMES on the FM-1's I2S clock (its crystal / 544, the crystal ppm off), late
+ * by up to lag_q16 halves (Q16; audio_ahead's long renders land up to two halves late), polls at 2 kHz on the crystal,
+ * an IN token a ms on the host's, which takes the packet the first poll after the last one queued. The frames sent
+ * must follow the crystal's I2S frames, not the renders: within the loop's phase band over every 4 s from the start
+ * (+-0.39 % for minutes was what a late render did to the old steering), corrected a frame at a time, never two
+ * packets in a row (a host that follows an asynchronous device's rate closely, iOS's Camera, filled the 5..6 short
+ * packets of the old steering with silence), hardly at all once the pattern's rate has the host's ms; the ring may
+ * run dry only while its first renders find how late they land. Time in 1/60 GHz: a ms is 60,000,000, a crystal tick
+ * (24 MHz) 2,500 */
+static uint32_t pace_rand = 12345u;
+static uint32_t pace_rnd(uint32_t n) { pace_rand = pace_rand * 1103515245u + 12345u; return (pace_rand >> 8) % n; }
+static void test_uac_pace(int r48, int32_t ppm, uint32_t lag_q16)
 {
-    const uint64_t MS = 60000000u, REND = 174080000u + (uint64_t)((int64_t)174080 * ppm / 1000);
-    uint64_t t_r = REND / 3u, t_p = 0;
-    uint32_t pkts = 0, adj_prev = 0, adjs = 0, runs = 0, lo_n = 99, hi_n = 0, base = r48 ? 48u : 44u;
-    uint32_t under0 = 0, over0 = 0;
-    uint64_t sent = 0, made = 0;
+    const uint64_t MS = 60000000u, REND = 174080000u + (uint64_t)((int64_t)174080 * ppm / 1000), POLL = REND * 12000u / (HALF_FRAMES * 544u);
+    uint64_t t_half = REND / 3u, t_r, t_poll = 0, t_in = MS / 3u, made = 0, sent = 0, t0 = 0, sent0 = 0;
+    uint32_t pkts = 0, adj_prev = 0, adjs = 0, adjs_late = 0, runs = 0, lo_n = 99, hi_n = 0, base = r48 ? 48u : 44u;
+    uint32_t under0 = 0, over0 = 0, q = 0, n_q = 0, win = 0;
+    int64_t worst = 0;
     static int32_t out[2u * HALF_FRAMES];
     static uint32_t pk[(UAC_MAXP + 3u) / 4u];
+    if (UA_PRIME + (uint64_t)HALF_FRAMES * lag_q16 / 65536u + HALF_FRAMES + UA_MAXF > UA_N) {
+        printf("USB audio pacing, renders up to %.1f halves late: not for a %u-frame ring\n", lag_q16 / 65536.0,
+               (unsigned)UA_N);                         /* (FELUCCA_UAC_CH's smallest: FELUCCA_UAC_RING_FRAMES) */
+        return;
+    }
     memset(&uac, 0, sizeof uac);
+    pace_t = 0;
+    pace_tick_num = HALF_FRAMES * 544u;                 /* the crystal's ticks a render */
+    pace_tick_den = REND;
     usb.config = 1;
     uac.alt = 1;
     uac.flowing = 1;
@@ -1177,45 +1195,127 @@ static void test_uac_pace(int r48, int32_t ppm)
     assert(!r48);
 #endif
     ua_w = ua_r = 0;
+    t_r = t_half + REND * (uint64_t)pace_rnd(lag_q16 + 1u) / 65536u;
     while (pkts < 61000u) {
-        if (t_r <= t_p) {                               /* the audio interrupt: a render */
+        uint64_t t = t_r < t_poll ? t_r : t_poll;
+        t = t < t_in ? t : t_in;
+        pace_t = t;
+        if (t == t_r) {                                 /* the audio interrupt: a render, landing late by its lag */
             uint32_t k;
             uac_render_start();
             for (k = 0; k < 2u * HALF_FRAMES; k++)
                 out[k] = 1000 << 8;
             uac_tap(out, HALF_FRAMES);
-            if (pkts >= 1000u)
-                made += HALF_FRAMES;
-            t_r += REND;
-        } else {                                        /* the host's IN token, once a ms */
-            uint32_t a0 = uac.adj_up + uac.adj_down, n = uac_packet(pk), adj;
-            adj = uac.adj_up + uac.adj_down - a0;
-            if (++pkts == 1000u)                        /* a second to settle, then counted */
-                under0 = uac.underruns, over0 = uac.overruns;
-            if (pkts > 1000u) {
+            made += HALF_FRAMES;
+            t_half += REND;
+            t_r = t_half + REND * (uint64_t)pace_rnd(lag_q16 + 1u) / 65536u;
+            if (t_r <= t)                               /* (one after another) */
+                t_r = t + 1u;
+        } else if (t == t_in) {                         /* the host's IN token, once a ms: the queued packet */
+            if (q) {
+                uint32_t n = n_q;
+                q = 0;
+                if (++pkts == 1000u)                    /* a second to settle, then counted */
+                    under0 = uac.underruns, over0 = uac.overruns;
                 sent += n;
-                adjs += adj;
-                runs += adj && adj_prev;
-                lo_n = n < lo_n ? n : lo_n;
-                hi_n = n > hi_n ? n : hi_n;
+                if (pkts > 1000u) {
+                    lo_n = n < lo_n ? n : lo_n;
+                    hi_n = n > hi_n ? n : hi_n;
+                }
+                if (pkts % 4000u == 0u) {               /* every 4 s: the frames sent against the crystal's */
+                    double want = (double)(t - t0) * (double)pace_tick_num / (double)pace_tick_den / 544.0
+                                  * (r48 ? 160.0 / 147.0 : 1.0);
+                    int64_t d = (int64_t)(sent - sent0) - (int64_t)(want + 0.5);
+                    if (win++)
+                        worst = d > worst ? d : -d > worst ? -d : worst;
+                    t0 = t;
+                    sent0 = sent;
+                }
             }
-            adj_prev = adj;
-            t_p += MS;
+            t_in += MS;
+        } else {                                        /* a poll (2 kHz on the crystal): queue the next packet */
+            if (!q) {
+                uint32_t a0 = uac.adj_up + uac.adj_down, adj;
+                n_q = uac_packet(pk);
+                q = 1;
+                adj = uac.adj_up + uac.adj_down - a0;
+                adjs += adj;
+                if (pkts > 40000u)
+                    adjs_late += adj;
+                runs += adj && adj_prev;
+                adj_prev = adj;
+            }
+            t_poll += POLL;
         }
     }
-    assert(uac.underruns == under0 && uac.overruns == over0);
-    assert(runs == 0);                                  /* never two steered packets in a row */
-    assert(lo_n >= base - 1u && hi_n <= base + 2u && hi_n <= UA_MAXF);
-    if (!ppm)                                           /* the pattern alone carries the I2S clock: hardly steered */
-        assert(adjs <= 60u);
+    assert(uac.overruns == over0);
+    assert(uac.underruns - under0 <= (lag_q16 ? 8u : 0u));   /* (a later render than any before: a hold) */
+    assert(runs == 0);                                  /* never two corrected packets in a row */
+    assert(lo_n >= base - 2u && hi_n <= base + 2u && hi_n <= UA_MAXF);
+    assert(worst <= 2 * UA_BAND + 4);                   /* the rate: the crystal's, within the phase band */
+    assert(adjs_late <= 8u);                            /* the pattern has the host's ms by then */
     {   /* the frames sent follow the frames made (at 48 kHz, x 160 / 147), within the ring */
         int64_t want = r48 ? (int64_t)(made * 160u / 147u) : (int64_t)made, d = (int64_t)sent - want;
         assert(d < (int64_t)UA_N && d > -(int64_t)UA_N);
     }
     uac.alt = 0;
     usb.config = 0;
-    printf("USB audio pacing, %s, crystal %+d ppm: 60 s, %u..%u frames a packet, %u steered, none in a row: OK\n",
-           r48 ? "48 kHz" : "44.1 kHz", (int)ppm, (unsigned)lo_n, (unsigned)hi_n, (unsigned)adjs);
+    printf("USB audio pacing, %s, crystal %+d ppm, renders up to %.1f halves late: 60 s, %u..%u frames a packet, "
+           "%u corrected (%u in the last 20 s), none in a row, the crystal's rate within %d frames every 4 s, %u held (the first second too): OK\n",
+           r48 ? "48 kHz" : "44.1 kHz", (int)ppm, lag_q16 / 65536.0, (unsigned)lo_n, (unsigned)hi_n, (unsigned)adjs,
+           (unsigned)adjs_late, (int)worst, (unsigned)uac.underruns);
+}
+#endif
+#if FELUCCA_UAC && !UA_MC
+/* a ring run dry: the packet holds the last frame and UA_HOLD more (the next packet starts with them), then the
+ * frames go on where they stopped: none lost, none repeated but the hold */
+static void test_uac_hold(void)
+{
+    static int32_t out[2u * HALF_FRAMES];
+    static uint32_t pk[(UAC_MAXP + 3u) / 4u];
+    uint32_t k, got = 0, held = 0, next = 1, i, n, prev = 0;
+    memset(&uac, 0, sizeof uac);
+    usb.config = 1;
+    uac.alt = 1;
+    uac.flowing = 1;
+    ua_w = ua_r = 0;
+    uac_render_start();                                 /* primed: UA_PRIME frames of silence */
+    for (k = 0; k < HALF_FRAMES; k++)
+        out[2u * k] = (int32_t)(k + 1u) << 8, out[2u * k + 1u] = 0;
+    uac_tap(out, HALF_FRAMES);
+    for (i = 0; i < 40u; i++) {                         /* the packets: past the ring's end, and two more */
+        n = uac_packet(pk);
+        for (k = 0; k < n; k++) {
+            uint32_t v = pk[k] & 0xFFFFu;
+            if (!v && next == 1u)
+                continue;                               /* the priming's silence */
+            if (v == next)
+                next++, got++;
+            else
+                assert(v == prev), held++;              /* a hold: the last frame again */
+            prev = v;
+        }
+    }
+    assert(got == HALF_FRAMES && uac.underruns > 0u && held >= UA_HOLD);
+    uac_render_start();                                 /* the next render: its frames follow at once */
+    for (k = 0; k < HALF_FRAMES; k++)
+        out[2u * k] = (int32_t)(HALF_FRAMES + k + 1u) << 8;
+    uac_tap(out, HALF_FRAMES);
+    for (i = 0; i < 2u; i++) {
+        n = uac_packet(pk);
+        for (k = 0; k < n; k++) {
+            uint32_t v = pk[k] & 0xFFFFu;
+            assert(v == next || (v == prev && uac.owe + n > k));   /* (the hold's rest, then the frames in order) */
+            if (v == next)
+                next++;
+            prev = v;
+        }
+    }
+    assert(next > HALF_FRAMES + 2u);
+    uac.alt = 0;
+    usb.config = 0;
+    printf("USB audio: a ring run dry holds the last frame, %u frames past it, and goes on where it stopped: OK\n",
+           (unsigned)UA_HOLD);
 }
 #endif
 #if UA_MC
@@ -1287,13 +1387,18 @@ int main(void)
 #if FELUCCA_UAC
     {
         static const int32_t PPM[3] = {0, 200, -200};
-        int i;
-        for (i = 0; i < 3; i++) {
-            test_uac_pace(0, PPM[i]);
-#if FELUCCA_UAC_48K
-            test_uac_pace(1, PPM[i]);
+#if !UA_MC
+        test_uac_hold();
 #endif
-        }
+        static const uint32_t LAG[3] = {0, 13107u, 117965u};   /* renders on time, up to 0.2 and 1.8 halves late */
+        int i, j;
+        for (i = 0; i < 3; i++)
+            for (j = 0; j < 3; j++) {
+                test_uac_pace(0, PPM[i], LAG[j]);
+#if FELUCCA_UAC_48K
+                test_uac_pace(1, PPM[i], LAG[j]);
+#endif
+            }
     }
 #endif
     usb_start();
