@@ -3,7 +3,7 @@
 **Status: settled.** The contributors whose Felucca code is here have answered: Leo Kuroshita for the code he owns
 (https://github.com/hugelton/felucca-bsp/issues/4) and keremimo for his part of `chip/usb.c` (below).
 
-Every file under `chip/`, `boards/`, `loader/` and `examples/` is MPL-2.0 (SPDX header in each file), except two Apache-2.0 files in `chip/` from JieLi's AC79 SDK: `ble_rf_tables_v15.h` (the radio's start-up program) and `fm1_rf_cal.h` (its calibration in C). For details, see NOTICE. The full text
+Every file under `chip/`, `boards/`, `loader/` and `examples/` is MPL-2.0 (SPDX header in each file), except two Apache-2.0 files in `chip/` from JieLi's AC79 SDK: `ble_rf_tables_v15.h` (the radio's start-up program) and `fm1_rf_cal.h` (its calibration in C); and the radio drivers from Optimist (`fm1_ble.h`, `fm1_ble_rf.h`, `fm1_bredr.h`, `fm1_wifi.h`), whose headers say `GPL-3.0-only OR MPL-2.0` (taken here under MPL-2.0). For details, see NOTICE. The full text
 is in `LICENSE`. The files carry no "Incompatible With Secondary Licenses" notice, so they can
 be combined with GPL code under MPL-2.0 section 3.3.
 
