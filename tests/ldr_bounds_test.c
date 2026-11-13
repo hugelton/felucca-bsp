@@ -13,6 +13,8 @@
  *   never [0, 0x4000) (the boot area), never [0xE0000, 0xE4000) (the staged loader), never [0xFC000, 0x100000)
  *   (globals, key_mac), never the staging's last sector 0xE4000 (the record 0xE4F00) before the finish;
  *   before the finish: the app area [0x4000, FL_APP_END), and with LDR_SLOT_SWITCH erases in [FL_APP_END, 0xE0000);
+ *   before the finish, also the sectors of the resource region (a package's res.bin entry) while ldr_core.c holds them
+ *   open (ldr_res_window), and only those: the window must be the package's region, whole sectors of the data area;
  *   in the finish (after ldr_record_clear): erase 0xE4000; program zeros (<= 80 B) over an update record that was
  *   there at a 4 KiB boundary - 256 in (FL_APP_END, 0xFC000] outside Felucca's store; or erase that record's sector.
  * After every session that did not finish, and at every power cut: the boot area, the staged loader, the record and
@@ -48,8 +50,8 @@ static void tb_op(int kind, uint32_t off, const uint8_t *p, uint32_t n);
 
 /* ---- the host: a package (UFW header + flash.bin + the fast install's table), replies as ota.c wants them ---- */
 enum { H_OK, H_SILENT_AFTER, H_WRONG_ADDR, H_WRONG_LEN, H_GARBAGE, H_FLIP_LATER, H_TBL_LEN, H_NO_SUCCESS };
-static uint8_t h_hdr[0x400], h_fl[NOR_SIZE + 0x1000], h_tbl[256 * 6];
-static uint32_t h_fl_off, h_fl_size, h_tbl_n, h_mode, h_arg, h_reads, h_flip_reads;
+static uint8_t h_hdr[0x400], h_fl[NOR_SIZE + 0x1000], h_tbl[256 * 6], h_res[NOR_SIZE];
+static uint32_t h_fl_off, h_fl_size, h_tbl_n, h_mode, h_arg, h_reads, h_flip_reads, h_res_off, h_res_size, h_res_base;
 static uint8_t rx[4800];
 static uint32_t rx_len, rx_full, now_ms;
 
@@ -92,6 +94,8 @@ static void host_data(uint32_t addr, uint8_t *d, uint32_t len)
             d[i] = h_hdr[a];
         else if (f < h_fl_size)
             d[i] = h_fl[f];
+        else if (h_res_size && a - h_res_off < h_res_size)
+            d[i] = h_res[a - h_res_off];
         else
             d[i] = 0;                                    /* past the package: zeros */
     }
@@ -196,6 +200,15 @@ static void ldr_record_clear(void)                       /* the finish starts he
 static int ldr_erase_begin(uint32_t off) { return flash_op(OP_ERASE_BEGIN, off, 0, 0x1000); }
 static int ldr_erase_end(void) { return 0; }
 static void ldr_progress(uint32_t done, uint32_t total) { (void)done; (void)total; }
+static uint32_t w_lo, w_hi;                              /* the resource region's window, as ldr_core.c opens it */
+static void viol(const char *why, int kind, uint32_t off, uint32_t n);
+static void ldr_res_window(uint32_t lo, uint32_t hi)
+{
+    if (hi && (lo != h_res_base || hi - lo != h_res_size || lo < 0x97000u || hi > 0xE0000u || (lo | hi) & 0xFFFu))
+        viol("a resource window that is not the package's region in the data area", OP_ERASE, lo, hi - lo);
+    w_lo = lo;
+    w_hi = hi;
+}
 #include "../loader/ldr_core.c"
 
 #if defined(LDR_SLOT_SWITCH) && LDR_SLOT_SWITCH
@@ -230,6 +243,8 @@ static void tb_op(int kind, uint32_t off, const uint8_t *p, uint32_t n)
         if (end > STG_REC_SEC && off < STG_HI) { viol("UPDATE RECORD before the finish", kind, off, n); return; }
         if (off >= 0x4000u && end <= APP_HI)
             return;
+        if (w_hi && off >= w_lo && end <= w_hi && kind != OP_ERASE_BEGIN)
+            return;                                      /* the resource region, open */
         if (SWITCH && kind == OP_ERASE && off >= APP_HI && end <= LDR_DATA_HI)
             return;                                      /* the slot switch's clear */
         viol("outside the app area", kind, off, n);
@@ -317,7 +332,11 @@ static void dev_init(uint32_t old_len, uint32_t old_end)
 typedef struct {
     uint32_t fl_off, fl_size, new_len, key;
     int head_zero, above_zero, flip_fl, flip_t16, flip_t32, bad_ufw, nent;
+    uint32_t res_len, res_base, res_seed;                /* a res.bin entry: its payload's length, where it goes */
+    int res_flip, res_bad;                               /* its payload damaged on the way; its record's CRC wrong */
 } pkg_t;
+#define RES_BASE 0xAB000u                                /* Polly's */
+#define RES_LEN 0xA9E0u                                  /* 11 sectors with its record */
 #define FLIP_AT (0x7000u + 5u)                           /* in sector 7: one the package changes (7 % 3 == 1) */
 
 static pkg_t pkg_default(void)
@@ -332,10 +351,36 @@ static pkg_t pkg_default(void)
     return p;
 }
 
+/* res.bin as fm1-base's build writes it: the commit record (magic "RES1", the payload's length and CRC-32, 16 zero
+ * bytes, the CRC-32 of those 28), the payload, padded to whole sectors */
+static void res_build(const pkg_t *p)
+{
+    uint32_t i;
+    h_res_size = p->res_len ? (32u + p->res_len + 0xFFFu) & ~0xFFFu : 0;
+    h_res_base = p->res_base;
+    memset(h_res, 0xFF, sizeof h_res);
+    if (!p->res_len)
+        return;
+    rng = 30 + p->res_seed;
+    for (i = 0; i < p->res_len; i++)
+        h_res[32 + i] = (uint8_t)rnd();
+    memset(h_res, 0, 32);
+    ota_wr32(h_res, LDR_RES_MAGIC);
+    ota_wr32(h_res + 4, p->res_len);
+    ota_wr32(h_res + 8, ldr_crc32(h_res + 32, p->res_len));
+    ota_wr32(h_res + 28, ldr_crc32(h_res, 28) ^ (p->res_bad ? 1u : 0u));
+    if (p->res_flip)
+        h_res[32 + 0x3000] ^= 0x20;                      /* damaged after its CRC: in its fourth sector */
+}
+static int res_whole(void)                               /* the region on the flash is the package's */
+{
+    return !memcmp(nor + h_res_base, h_res, h_res_size);
+}
+
 static void pkg_build(const pkg_t *p)
 {
-    uint8_t ent[2][0x50];
-    uint32_t i, k, fl_crc, sz = p->fl_size < NOR_SIZE ? p->fl_size : NOR_SIZE;
+    uint8_t ent[3][0x50];
+    uint32_t i, k, fl_crc, sz = p->fl_size < NOR_SIZE ? p->fl_size : NOR_SIZE, ne = p->res_len ? 3u : 2u;
     memset(h_fl, 0, sizeof h_fl);
     memcpy(h_fl, before, sz < 0x4000u ? sz : 0x4000u);  /* flash.bin's head: the device's ... */
     if (p->head_zero) memset(h_fl, 0, 0x4000);           /* ... or a hostile one */
@@ -364,13 +409,22 @@ static void pkg_build(const pkg_t *p)
     ota_wr32(ent[1] + 8, 0x200);
     ota_wr32(ent[1] + 12, 0x200);
     memcpy(ent[1] + 0x40, "ota.bin", 7);
-    for (i = 0; i < 2u; i++) {
+    res_build(p);
+    h_res_off = (p->fl_off + sz + 0xFFu) & ~0xFFu;
+    if (ne == 3u) {                                      /* res.bin (fm1pkg_make.py: type 101, where at 0x14) */
+        ota_wr16(ent[2], LDR_RES_TYPE);
+        ota_wr32(ent[2] + 8, h_res_off);
+        ota_wr32(ent[2] + 12, h_res_size);
+        ota_wr32(ent[2] + LDR_RES_AT, p->res_base);
+        memcpy(ent[2] + 0x40, "res.bin", 7);
+    }
+    for (i = 0; i < ne; i++) {
         ota_jl_enc(ent[i], 0x50);
         memcpy(h_hdr + 0x40 + i * 0x50u, ent[i], 0x50);
     }
-    ota_wr32(h_hdr + 4, 0x400 + sz);
-    ota_wr16(h_hdr + 8, (uint32_t)p->nent);
-    ota_wr16(h_hdr + 2, ota_crc16(h_hdr + 0x40, 2 * 0x50u, 0));
+    ota_wr32(h_hdr + 4, ne == 3u ? h_res_off + h_res_size : 0x400 + sz);
+    ota_wr16(h_hdr + 8, p->nent == 2 ? ne : (uint32_t)p->nent);
+    ota_wr16(h_hdr + 2, ota_crc16(h_hdr + 0x40, ne * 0x50u, 0));
     ota_wr16(h_hdr, ota_crc16(h_hdr + 2, 0x3E, 0) ^ (p->bad_ufw ? 1u : 0u));
     ota_jl_enc(h_hdr, 0x40);
     if (p->flip_fl == 1) h_fl[FLIP_AT] ^= 0x10;          /* damaged on the way: after the package's and table's CRCs */
@@ -393,6 +447,10 @@ static int rec_valid(uint32_t at) { return ldr_is_record(nor + at); }
 static int sector_erased(uint32_t sec) { return nor[sec] == 0xFF && !memcmp(nor + sec, nor + sec + 1, 0xFFF); }
 
 static int fails, lenient;
+/* the resource region after a whole install: RES_KEPT as it was (none in the package, or one the loader leaves
+ * alone), RES_WHOLE the package's, RES_SOME the package's or without a valid record (the flash failed there) */
+enum { RES_KEPT, RES_WHOLE, RES_SOME };
+static int res_want;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("  FAIL [%s] %s:%d: ", case_name, __FILE__, __LINE__); \
                                        printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -425,6 +483,7 @@ static void check_final(uint32_t clo, uint32_t chi)
     for (a = APP_HI; a < GLOB_LO; a++) {                 /* above the app: only the clear and the killed records */
         int kill = 0;
         if ((a >= clo && a < chi) || (a >= STG_LO && a < STG_HI)) continue;
+        if (res_want != RES_KEPT && a - h_res_base < h_res_size) continue;
         for (i = 0; i < 2u; i++)                         /* in place (zeros), or (its program failed) its sector */
             kill |= (a >= killed[i] && a < killed[i] + 80u && nor[a] == 0) ||
                     ((a & ~0xFFFu) == (killed[i] & ~0xFFFu) && sector_erased(a & ~0xFFFu));
@@ -435,6 +494,12 @@ static void check_final(uint32_t clo, uint32_t chi)
     if (!(REC_STORE >= clo && REC_STORE < chi))
         CHECK(rec_valid(REC_STORE), "a record lookalike in Felucca's store was touched");
     CHECK(!rec_valid(REC_STOCK), "the stock record is still there");
+    if (res_want == RES_WHOLE)
+        CHECK(res_whole(), "the resource region is not the package's");
+    if (res_want == RES_SOME)
+        CHECK(res_whole() || !ldr_record(nor + h_res_base, LDR_RES_MAGIC) ||
+              ota_rd32(nor + h_res_base + 8) != ldr_crc32(nor + h_res_base + 32, ota_rd32(nor + h_res_base + 4)),
+              "a resource record over a region that is not whole");
 }
 
 static void begin(const char *name)
@@ -588,6 +653,98 @@ static void bad_host_then_resume(const char *name, const pkg_t *p, int fast, uin
     check_final(0, 0);
 }
 
+/* a saved object's commit record (fm1-base storage.c) at a sector's start, on the device as it was */
+static void put_save(uint32_t at)
+{
+    memset(nor + at, 0, 32);
+    ota_wr32(nor + at, LDR_ST_MAGIC);
+    ota_wr32(nor + at + 28, ldr_crc32(nor + at, 28));
+    memcpy(before + at, nor + at, 32);
+}
+
+/* the resource region (a package's res.bin entry): written after the app, kept, left alone, never in the open */
+static void res_cases(int fast)
+{
+    const char *m = fast ? "fast" : "classic";
+    const uint32_t same_len = APP_HI - 0x4000u - 0x100u;
+    static const uint32_t bad_base[] = {0x90000u, 0x96000u, 0xD9000u, 0xE0000u, 0x97800u, 0xFFFFF000u};
+    pkg_t q = pkg_default(), r;
+    char nm[96];
+    uint32_t i, all;
+    int rc;
+    q.res_len = RES_LEN;
+    q.res_base = RES_BASE;
+    res_want = RES_WHOLE;
+    snprintf(nm, sizeof nm, "%s: res: written after the app", m);
+    install(nm, &q, same_len, APP_HI, fast, 0, 0);
+    CHECK(h_res_size == 0xB000u, "the region is %#x B", h_res_size);
+    snprintf(nm, sizeof nm, "%s: res: the same package again", m);
+    begin(nm);
+    rc = run(fast);
+    end(rc, 0);
+    CHECK(n_erase == 0 && n_prog == 0, "%u erases, %u programs", n_erase, n_prog);
+    check_final(0, 0);
+    snprintf(nm, sizeof nm, "%s: res: another build's over it", m);
+    begin(nm);
+    r = q;
+    r.res_seed = 1;
+    r.res_len = RES_LEN - 0x2000u;
+    pkg_build(&r);
+    rc = run(fast);
+    end(rc, 0);
+    CHECK(res_whole(), "the region is not the new package's");
+    snprintf(nm, sizeof nm, "%s: res: power cut at op k, resumed", m);
+    cut_sweep(nm, &q, same_len, APP_HI, fast, 0, 0, 0);
+    res_want = RES_SOME;
+    snprintf(nm, sizeof nm, "%s: res: flash fails at op k, resumed", m);
+    cut_sweep(nm, &q, same_len, APP_HI, fast, 0, 0, 1);
+    r = q;
+    r.res_flip = 1;
+    snprintf(nm, sizeof nm, "%s: res: payload damaged on the way", m);
+    install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    CHECK(!ldr_record(nor + RES_BASE, LDR_RES_MAGIC), "a record over a damaged payload");
+    res_want = RES_KEPT;
+    snprintf(nm, sizeof nm, "%s: res: a save in the region", m);
+    begin(nm);
+    dev_init(same_len, APP_HI);
+    put_save(RES_BASE + 0x5000u);
+    pkg_build(&q);
+    rc = run(fast);
+    end(rc, 0);
+    check_final(0, 0);
+    r = q;
+    r.res_bad = 1;
+    snprintf(nm, sizeof nm, "%s: res: its record's CRC wrong", m);
+    install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    for (i = 0; i < sizeof bad_base / sizeof bad_base[0]; i++) {
+        r = q;
+        r.res_base = bad_base[i];
+        snprintf(nm, sizeof nm, "%s: res: at %#x (not whole sectors of the data area)", m, bad_base[i]);
+        install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    }
+    r = q;
+    r.res_len = 0x7E000u;
+    snprintf(nm, sizeof nm, "%s: res: longer than the data area", m);
+    install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    snprintf(nm, sizeof nm, "%s: res: host silent while it comes", m);
+    begin(nm);
+    dev_init(same_len, APP_HI);
+    pkg_build(&q);
+    rc = run(fast);
+    all = h_reads;                                       /* every read of a whole install */
+    begin(nm);
+    dev_init(same_len, APP_HI);
+    pkg_build(&q);
+    h_mode = H_SILENT_AFTER;
+    h_arg = all - (fast ? 8u : 50u);                     /* silent partway through the region */
+    rc = run(fast);
+    end(rc, 0);
+    res_want = RES_SOME;
+    check_final(0, 0);
+    CHECK(!ldr_record(nor + RES_BASE, LDR_RES_MAGIC), "a record over a region the host stopped serving");
+    res_want = RES_KEPT;
+}
+
 int main(void)
 {
     pkg_t p = pkg_default(), q;
@@ -679,6 +836,10 @@ int main(void)
         h_mode = H_NO_SUCCESS;
         { int rc = run(fast); end(rc, 0); }
         check_final(0, 0);
+    }
+    for (fast = 0; fast < 2; fast++) {
+        printf(" %s: the resource region\n", fast ? "fast" : "classic");
+        res_cases(fast);
     }
     printf(" classic only\n");
     bad_host_then_resume("classic: sector 0x10000 changes after the check pass", &p, 0, H_FLIP_LATER, 0x10000);

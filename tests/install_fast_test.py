@@ -4,7 +4,8 @@
 """tools/fm1_install.py's step 2 against the real update loader (loader/ldr_core.c, chip/ota.c) on a pipe
 (tests/ldr_pipe.c, built here with the C compiler: CC, default cc): the classic install from an older host, the fast
 install, a loader from before the fast install, the same package again, a power cut halfway and the install resumed,
-the host gone halfway while the loader keeps its session, and a damaged table refused before anything is erased.
+the host gone halfway while the loader keeps its session, a damaged table refused before anything is erased, and a
+package with a resource region (res.bin), written after the app by either install and kept by the next.
 Run from the repo root:  python3 tests/install_fast_test.py
 (FM1_INSTALL_TOOLS=DIR: the fm1_install.py in DIR instead of tools/)"""
 import os
@@ -24,6 +25,7 @@ import fm1_install as I  # noqa: E402
 I.DELAY.update(open=0, start=0.05, start_fast=0.01, fast_hello=0.5, reply=0, retry=0.02, poll=0.05, hs=0.3,
                hs_full=0.1, idle_write=3)
 APP_LO, APP_HI, FL_OFF = 0x4000, 0x93000, 0x400
+RES_BASE, RES_SIZE, RES_OFF = 0xAB000, 0xB000, 0x400 + 0x93000      # tests/ldr_pipe.c's
 failed = 0
 
 
@@ -147,9 +149,9 @@ def build(name, fast):
     return str(exe)
 
 
-def device(exe, name):
+def device(exe, name, res=False):
     flash, image = TMP / f"{name}.nor", TMP / f"{name}.img"
-    subprocess.run([exe, "init", str(flash), str(image)], check=True)
+    subprocess.run([exe, "init", str(flash), str(image)] + (["res"] if res else []), check=True)
     return str(flash), image.read_bytes()
 
 
@@ -266,6 +268,22 @@ def main():
     err_text = dev.proc.stderr.read().decode()
     ok(err == "stopped" and "session -12" in err_text and Path(flash).read_bytes() == before,
        "a damaged table: refused (-12) with nothing erased or written")
+
+    for fast in (False, True):
+        how = "fast" if fast else "classic"
+        flash, image = device(fast_exe, f"res-{how}", res=True)
+        dev = Loader(fast_exe, flash)
+        err, bar = write(dev, image, classic=not fast)
+        nor = Path(flash).read_bytes()
+        ok(err is None and dev.wait() == 0 and done(flash, image) and (bar == sorted(bar) or not fast)
+           and nor[RES_BASE:RES_BASE + RES_SIZE] == image[RES_OFF:RES_OFF + RES_SIZE],
+           f"{how} install with res.bin: the region written after the app, at {RES_BASE:#x}")
+        subprocess.run([fast_exe, "rearm", flash], check=True)
+        dev = Loader(fast_exe, flash)
+        err, bar = write(dev, image, classic=not fast)
+        reads = [n for a, n in dev.reqs if RES_OFF <= a < RES_OFF + RES_SIZE]
+        ok(err is None and dev.wait() == 0 and Path(flash).read_bytes() == nor and len(reads) == 1,
+           f"{how}: the same package again: the region kept, its record read once")
 
     ok(I.FAST_HELLO.hex() == "f0003245190000400000203807f7", "the hello: the vector shared with the other hosts")
     data = bytes(((i * 31) ^ (i >> 8)) & 0xFF for i in range(8192))

@@ -16,6 +16,9 @@
  *      sectors that are already equal, and verifies each one; a sector that
  *      comes in different from the checked pass is read again, never written;
  *      the flash head (SPL, isd_config) is never written;
+ *   3b. writes the resource region from the package's res.bin entry, if it has one (ldr_res: an app's read-only
+ *      data kept out of its image, fm1-base device/res.c), the app being written already: nothing there decides
+ *      whether the FM-1 starts, and a failure there never fails the install (the app does without and says so);
  *   4. asks 0xF0000000 ("success"), then invalidates the update record (RAM
  *      and flash: 4K boundary - 256 between 0x93000 and 0xFC000, outside
  *      Felucca's store, where only user data lives) so the SPL boots the new
@@ -36,6 +39,8 @@
  *                              the fast install: the table's bytes, then each app sector compared or written
  *   with LDR_FAST_CHUNK (the fast install, ldr_fast below): ldr_erase_begin(off) ldr_erase_end(), an erase while a
  *   sector comes in (no flash access between)
+ *   ldr_res_window(lo, hi) the data area's sectors [lo, hi) open to ldr_erase / ldr_prog while 3b writes them (0, 0:
+ *                          closed again); the platform keeps the rest of the data area shut
  * plus the ota.c hooks (frames, time, idle). */
 #define LDR_APP_LO 0x4000u
 #define LDR_APP_HI 0x93000u
@@ -45,12 +50,18 @@
 #define LDR_DATA_HI 0xE0000u                    /* bytes (user samples) the host writes */
 #define LDR_NSEC ((LDR_APP_HI - LDR_APP_LO) >> 12)
 #define LDR_FL_MAX 0x100000u                    /* flash.bin: at most the 1 MiB part */
+#define LDR_RES_TYPE 101u                       /* the package's res.bin (fm1-base tools/fm1pkg_make.py RES_TYPE, as
+                                                 * Melodee's); its entry's word at LDR_RES_AT: where the region goes */
+#define LDR_RES_AT 0x14u
+#define LDR_RES_MAGIC 0x31534552u               /* "RES1": the region's commit record (fm1-base device/res.c) */
+#define LDR_ST_MAGIC 0x30583058u                /* "X0X0": a saved object's commit record (fm1-base device/storage.c) */
 
 static int ldr_fread(uint32_t off, void *p, uint32_t n);
 static int ldr_erase(uint32_t off);
 static int ldr_prog(uint32_t off, const void *p, uint32_t n);
 static void ldr_record_clear(void);
 static void ldr_progress(uint32_t done, uint32_t total);
+static void ldr_res_window(uint32_t lo, uint32_t hi);
 
 /* SFC cipher: per 32-byte block, key ^ (block offset >> 2) */
 static void ldr_sfc(uint8_t *p, uint32_t n, uint32_t base_off, uint32_t key)
@@ -97,8 +108,8 @@ static int ldr_chip_key(uint32_t *key)
 }
 
 /* 2b. flash.bin [0, fl_size) from the host, before any erase: its CRC16 must be the UFW entry's (want); sc gets
- * the CRC16 of each app sector as it came in */
-static int ldr_check(uint32_t fl_off, uint32_t fl_size, uint32_t want, uint16_t *sc, uint8_t *b)
+ * the CRC16 of each app sector as it came in. total: the bar's scale */
+static int ldr_check(uint32_t fl_off, uint32_t fl_size, uint32_t want, uint16_t *sc, uint8_t *b, uint32_t total)
 {
     uint32_t i, n, crc = 0;
     for (i = 0; i < fl_size; i += n) {
@@ -107,7 +118,7 @@ static int ldr_check(uint32_t fl_off, uint32_t fl_size, uint32_t want, uint16_t 
             return -7;
         crc = ota_crc16(b, n, crc);
         if (!((i + n) & 0xFFFu))
-            ldr_progress(i + n, fl_size + (LDR_APP_HI - LDR_APP_LO));
+            ldr_progress(i + n, total);
         if (i >= LDR_APP_LO && i < LDR_APP_HI) {     /* (512-byte reads from 0: never across a sector) */
             uint32_t k = (i - LDR_APP_LO) >> 12;
             sc[k] = (uint16_t)ota_crc16(b, n, (i & 0xFFFu) ? sc[k] : 0u);
@@ -185,6 +196,112 @@ static int ldr_write_sector(uint32_t s, const uint8_t *sec, uint8_t *cur, uint32
     return -11;                                          /* verify failed twice */
 }
 
+/* CRC-32 (zlib's), bit by bit; running: from 0xFFFFFFFF, the CRC is the complement of the end */
+static uint32_t ldr_crc32_run(uint32_t c, const uint8_t *p, uint32_t n)
+{
+    uint32_t k;
+    while (n--) {
+        c ^= *p++;
+        for (k = 0; k < 8u; k++)
+            c = (c >> 1) ^ (c & 1u ? 0xEDB88320u : 0u);
+    }
+    return c;
+}
+static uint32_t ldr_crc32(const uint8_t *p, uint32_t n) { return ~ldr_crc32_run(0xFFFFFFFFu, p, n); }
+
+/* a 32-byte commit record (device/res.c's, storage.c's): its magic first, the CRC-32 of the 28 bytes before it last */
+static int ldr_record(const uint8_t *h, uint32_t magic)
+{
+    return ota_rd32(h) == magic && ota_rd32(h + 28) == ldr_crc32(h, 28);
+}
+
+/* the package's res.bin entry (the entry list as ota_ufw left it, decoded): its offset, length and place, 0 if none */
+static void ldr_res_entry(const uint8_t *hdr, uint32_t *off, uint32_t *size, uint32_t *base)
+{
+    uint32_t i;
+    *off = *size = *base = 0;
+    for (i = 0; i < ota_rd16(hdr + 8); i++) {
+        const uint8_t *e = hdr + 0x40 + i * 0x50u;
+        if (ota_rd16(e) == LDR_RES_TYPE) {
+            *off = ota_rd32(e + 8);
+            *size = ota_rd32(e + 12);
+            *base = ota_rd32(e + LDR_RES_AT);
+        }
+    }
+}
+
+/* n bytes of the package from src, chunk at a time (512: every host; 4 KiB: one that said yes to the fast install) */
+static int ldr_pkg(uint32_t src, uint8_t *b, uint32_t n, uint32_t chunk)
+{
+    uint32_t k;
+    for (k = 0; k < n; k += chunk)
+        if (ota_read(src + k, b + k, n - k < chunk ? n - k : chunk))
+            return -1;
+    return 0;
+}
+
+/* the CRC-32 of the flash's [at, at + n), through cur */
+static int ldr_flash_crc(uint32_t at, uint32_t n, uint8_t *cur, uint32_t *crc)
+{
+    uint32_t k, c = 0xFFFFFFFFu;
+    for (; n; at += k, n -= k) {
+        k = n > 0x1000u ? 0x1000u : n;
+        if (ldr_fread(at, cur, k))
+            return -1;
+        c = ldr_crc32_run(c, cur, k);
+    }
+    *crc = ~c;
+    return 0;
+}
+
+/* 3b. the resource region (fm1-base device/res.c) from the package's res.bin: the region as the FM-1 holds it, its
+ * commit record (magic, the payload's length and CRC-32, its own CRC) then the payload, padded to whole sectors; off,
+ * size: its entry, base: where the region starts (whole sectors of the data area, or nothing is done). Kept when it
+ * holds this build's region whole already (an update that keeps the resources reads one header from the host). Left
+ * alone when any of its sectors holds a saved object (storage.c's commit record): saves an app has not moved out of
+ * the region yet, or another firmware's; the app then does without and says so, and the host's own write (res.c
+ * RES_REQ: fm1_resources.py, the installer page) or the next install can do it. Otherwise the record's sector goes
+ * blank first, every other sector is written and verified, then the first one's payload; the record last, only over a
+ * payload whose CRC-32 is its own, so a valid record only ever stands over a whole region. done, total: the bar.
+ * After Melodee's (firmware/loader/ldr_core.c ldr_res, by Kerem Kilic, Ellic Studio; used under MPL-2.0 with
+ * permission) */
+static void ldr_res(uint32_t off, uint32_t size, uint32_t base, uint32_t chunk, uint8_t *sec, uint8_t *cur,
+                    uint32_t done, uint32_t total)
+{
+    uint32_t s, k, len, crc, have;
+    if (!off || !size || (size & 0xFFFu) || (base & 0xFFFu) || base < LDR_DATA_LO || base >= LDR_DATA_HI ||
+        size > LDR_DATA_HI - base || ldr_pkg(off, sec, 512u, 512u) || !ldr_record(sec, LDR_RES_MAGIC) ||
+        (len = ota_rd32(sec + 4)) > size - 32u)
+        return;
+    crc = ota_rd32(sec + 8);
+    if (ldr_fread(base, cur, 32))
+        return;
+    if (ota_memeq(sec, cur, 32) && !ldr_flash_crc(base + 32u, len, cur, &have) && have == crc)
+        return;                                          /* this build's, whole */
+    for (s = base; s < base + size; s += 0x1000u)
+        if (ldr_fread(s, cur, 32) || ldr_record(cur, LDR_ST_MAGIC))
+            return;                                      /* saves there */
+    ldr_res_window(base, base + size);
+    if (ldr_erase(base))                                 /* the commit record goes first */
+        goto out;
+    for (s = base + 0x1000u; s < base + size; s += 0x1000u) {
+        if (ldr_pkg(off + (s - base), sec, 0x1000u, chunk) || ldr_fread(s, cur, 0x1000u) ||
+            (!ota_memeq(sec, cur, 0x1000u) && ldr_write_sector(s, sec, cur, 0)))
+            goto out;
+        ldr_progress(done += 0x1000u, total);
+    }
+    if (ldr_pkg(off, sec, 0x1000u, chunk) || ldr_prog(base + 32u, sec + 32, 224))   /* the first page's payload */
+        goto out;
+    for (k = 0x100u; k < 0x1000u; k += 0x100u)
+        if (ldr_prog(base + k, sec + k, 256))
+            goto out;
+    if (!ldr_flash_crc(base + 32u, len, cur, &have) && have == crc)
+        (void)ldr_prog(base, sec, 32);                   /* the commit record */
+    ldr_progress(done + 0x1000u, total);
+out:
+    ldr_res_window(0, 0);
+}
+
 /* 4. finish: the host confirms, the record goes, the SPL boots the app */
 static int ldr_finish(uint8_t *b)
 {
@@ -215,12 +332,14 @@ static int ldr_classic(void)
 {
     static uint16_t sc[LDR_NSEC];
     uint8_t *const hdr = ldr_hdr, *const sec = ldr_sec, *const cur = ldr_cur;
-    uint32_t k, fl_off, fl_size, key, s, want, done = 0;
+    uint32_t k, fl_off, fl_size, key, s, want, done = 0, r_off, r_size, r_base, total;
     int rc;
     if ((rc = ldr_head(hdr, sec, &fl_off, &fl_size, &want, &key)) != 0)
         return rc;
+    ldr_res_entry(hdr, &r_off, &r_size, &r_base);
+    total = fl_size + (LDR_APP_HI - LDR_APP_LO) + r_size;
     /* 2b. the whole package first: nothing is erased for a damaged one */
-    if ((rc = ldr_check(fl_off, fl_size, want, sc, sec)) != 0)
+    if ((rc = ldr_check(fl_off, fl_size, want, sc, sec, total)) != 0)
         return rc;
     /* 3. app area, sector by sector */
     for (s = LDR_APP_LO; s < LDR_APP_HI; s += 0x1000u) {
@@ -239,8 +358,9 @@ static int ldr_classic(void)
         if (!ota_memeq(sec, cur, 0x1000u) && (rc = ldr_write_sector(s, sec, cur, 0)) != 0)
             return rc;
         done += 0x1000u;
-        ldr_progress(fl_size + done, fl_size + (LDR_APP_HI - LDR_APP_LO));
+        ldr_progress(fl_size + done, total);
     }
+    ldr_res(r_off, r_size, r_base, 512u, sec, cur, fl_size + done, total);
     return ldr_finish(sec);
 }
 
@@ -274,17 +394,6 @@ static void ldr_fast_hello(void)
         return;
     ldr_fast_on = 1;
     ota_send_msg(LDR_FAST_CMD, r, 3);
-}
-
-static uint32_t ldr_crc32(const uint8_t *p, uint32_t n)   /* zlib's */
-{
-    uint32_t c = 0xFFFFFFFFu, k;
-    while (n--) {
-        c ^= *p++;
-        for (k = 0; k < 8u; k++)
-            c = (c >> 1) ^ (c & 1u ? 0xEDB88320u : 0u);
-    }
-    return ~c;
 }
 
 /* the CRC16 (ota_crc16's) of 4 KiB of zeros from c. CCITT's polynomial is (x + 1) times a primitive one of degree 15, so
@@ -338,16 +447,18 @@ static int ldr_fast(void)
 {
     static uint8_t tbl[LDR_NMAX * 6u];
     uint8_t *const hdr = ldr_hdr, *const sec = ldr_sec, *const cur = ldr_cur;
-    uint32_t fl_off, fl_size, key, s, want, n, total, done = 0, k, note_k = 0, note_ms;
+    uint32_t fl_off, fl_size, key, s, want, n, total, done = 0, k, note_k = 0, note_ms, r_off, r_size, r_base;
     int rc;
     if ((rc = ldr_head(hdr, sec, &fl_off, &fl_size, &want, &key)) != 0)
         return rc;
     if (fl_size & 0xFFFu)
         return ldr_classic();
+    ldr_res_entry(hdr, &r_off, &r_size, &r_base);
     n = fl_size >> 12;
-    total = n * 6u + (LDR_APP_HI - LDR_APP_LO);           /* the bar: the table read, then every app sector compared
+    total = n * 6u + (LDR_APP_HI - LDR_APP_LO) + r_size;  /* the bar: the table read, then every app sector compared
                                                           * (kept or written), from 0: not flash.bin's half of the
-                                                          * classic scale, whose check pass takes no time here */
+                                                          * classic scale, whose check pass takes no time here; then
+                                                          * the resource region's sectors */
     if (ota_read(LDR_TBL + fl_off, tbl, n * 6u))
         return -7;
     if (!ldr_table_ok(tbl, n, want))
@@ -378,6 +489,7 @@ static int ldr_fast(void)
         }
         ldr_progress(n * 6u + done, total);
     }
+    ldr_res(r_off, r_size, r_base, LDR_FAST_CHUNK, sec, cur, n * 6u + done, total);
     return ldr_finish(sec);
 }
 
