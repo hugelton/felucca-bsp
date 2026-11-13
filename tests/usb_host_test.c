@@ -86,6 +86,7 @@ static void *ep_tadr[5];
 static uint32_t USB_CON0, line_state;
 static uint8_t bus_dead;                /* nothing answers (cable pulled) */
 static uint8_t ep0_timeout;             /* SETUP stays busy until the driver's deadline */
+static uint32_t slow_until;              /* nothing answers before this many root resets (a device slow after a reset) */
 static uint8_t devctl_ls;               /* the device is low speed */
 static uint32_t ctl_requests, setup_requests, rx_toggle_clears;
 static uint32_t tx_toggle_clears, off_count;
@@ -245,7 +246,7 @@ static void mock_write(uint32_t r, uint32_t v)
             memcpy(s, ep_radr[0], 8);
             if (ep0_timeout)
                 regs[0][17] = 2;
-            else if (bus_dead || !d || !answer(d, s))
+            else if (bus_dead || !d || root_resets < slow_until || !answer(d, s))
                 regs[0][17] = 0x10;                     /* no answer */
             else
                 regs[0][17] = 0;
@@ -635,6 +636,7 @@ static void connect(int which)
     devices_init();
     root = which;
     bus_dead = devctl_ls = ep0_timeout = 0;
+    slow_until = 0;
     memset(common, 0, sizeof common);
     memset(regs, 0, sizeof regs);
     dflt = 0;
@@ -892,6 +894,20 @@ static void test_idle_hub(int with_stick)
            with_stick ? "with a stick" : "empty");
 }
 
+/* a device that answers nothing until the third reset (its recovery 400 ms: an Elektron Digitone II, NO MIDI 1 -1 before):
+ * enumerated, the resets stopped there */
+static void test_slow_device(void)
+{
+    connect(KBD);
+    slow_until = 3;
+    host_on();
+    int e = enumerate();
+    assert(e && uh.msg == UH_MSG_MIDI && root_resets == 3);
+    usb_host_switch(0); usb_host_task(fm1_ms); uh.msg = 0;
+    slow_until = 0;
+    printf("USB host: a device answering after the third root reset (400 ms): found: OK\n");
+}
+
 static void test_failed_probe(void)
 {
     connect(-1);                                      /* a powered line with nothing answering EP0 */
@@ -906,7 +922,7 @@ static void test_failed_probe(void)
         usb_host_task(now);
         assert(fm1_ms == now && !uh.run && !uh.msg);
     }
-    assert(root_resets == 1 && host_attaches == 1 && setup_requests == requests);
+    assert(root_resets == UH_ROOT_TRIES && host_attaches == 1 && setup_requests == requests);   /* (reset again, longer: uh_connect) */
     usb_host_switch(0); usb_host_task(fm1_ms); uh.msg = 0;
 
     connect(HUB);
@@ -1069,6 +1085,20 @@ static void test_endpoint_selection(void)
     assert(!uh_parse_midi(d, sizeof d, &m));
     d[32] = 0; d[38] = 0;                             /* invalid packet size */
     assert(!uh_parse_midi(d, sizeof d, &m));
+    {   /* Elektron Digitone II (1935:0134), its descriptor as read: bulk 512 on both MIDI endpoints, given to a
+         * full-speed host as well (it stalls the device qualifier): used as 64 */
+        static const uint8_t dn2[] = {
+            0x09,0x02,0x65,0x00,0x02,0x01,0x00,0xc0,0x03, 0x09,0x04,0x00,0x00,0x00,0x01,0x01,0x00,0x00,
+            0x09,0x24,0x01,0x00,0x01,0x09,0x00,0x01,0x01, 0x09,0x04,0x01,0x00,0x02,0x01,0x03,0x00,0x00,
+            0x07,0x24,0x01,0x00,0x01,0x41,0x00, 0x06,0x24,0x02,0x01,0x01,0x00, 0x06,0x24,0x02,0x02,0x02,0x00,
+            0x09,0x24,0x03,0x01,0x03,0x01,0x02,0x01,0x00, 0x09,0x24,0x03,0x02,0x04,0x01,0x01,0x01,0x00,
+            0x09,0x05,0x01,0x02,0x00,0x02,0x00,0x00,0x00, 0x05,0x25,0x01,0x01,0x01,
+            0x09,0x05,0x81,0x02,0x00,0x02,0x00,0x00,0x00, 0x05,0x25,0x01,0x01,0x03};
+        assert(sizeof dn2 == 101u);
+        assert(uh_parse_midi(dn2, sizeof dn2, &m) && m.iface == 1 && m.in_ep == 1 && m.in_mps == 64 && m.out_ep == 1 &&
+               m.out_mps == 64);
+        printf("USB host: Digitone II's high-speed bulk 512 taken as 64: OK\n");
+    }
     /* A receive-only controller rejects output; an output-only synth is still enumerated. */
     connect(KBD); kbd_cfg_len = build_kbd_cfg(kbd_cfg, 0);
     host_on(); assert(enumerate() && uh.in_ep && !uh.out_mps && !midi_out_try(0x643c9009u));
@@ -1142,6 +1172,7 @@ int main(void)
     test_idle_hub(0);
     test_idle_hub(1);
     test_failed_probe();
+    test_slow_device();
     test_hub_synth_unplug();
     test_host_output(0);
     test_host_output(1);
