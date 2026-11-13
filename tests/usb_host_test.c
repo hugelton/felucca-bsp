@@ -367,6 +367,10 @@ static volatile uint8_t render_busy;
 static uint8_t sx_seen[8];                              /* FELUCCA_SYSEX_BYTE: the bytes the hook saw */
 static uint32_t sx_seen_n;
 #define FELUCCA_SYSEX_BYTE(b) (sx_seen_n < sizeof sx_seen ? (void)(sx_seen[sx_seen_n++] = (b)) : (void)0)
+#ifdef TEST_SERIAL
+const char *test_serial_fn(void) { return "0123456789ABCDEF"; }   /* FELUCCA_USB_SERIAL_FN: this device's serial number */
+#define FELUCCA_USB_SERIAL_FN test_serial_fn
+#endif
 #include "../chip/usb.c"
 
 /* ------------------------------------------- the device's descriptors --- */
@@ -427,6 +431,18 @@ static uint32_t check_descriptors(int cdc_on, int verbose)
     usb_cdc_on = (uint8_t)cdc_on;
 #endif
     assert(get_desc(0x0100, &dv, &dl) && dl == 18 && dv[0] == 18 && dv[1] == 1);
+#ifdef TEST_SERIAL
+    {   /* the serial number: string 3, the function's, whole */
+        const uint8_t *sd;
+        uint16_t sl;
+        assert(dv[16] == 3);
+        assert(get_desc(0x0303, &sd, &sl) && sd[1] == 3 && sl == sd[0] && sl == 2u + 2u * 16u);
+        for (uint32_t j = 0; j < 16u; j++)
+            assert(sd[2 + 2 * j] == (uint8_t)"0123456789ABCDEF"[j] && sd[3 + 2 * j] == 0);
+    }
+#else
+    assert(dv[16] == 0);                                /* no serial number */
+#endif
     assert(get_desc(0x0200, &c, &cl) && c[1] == 2);
     assert((c[2] | c[3] << 8) == cl);                   /* wTotalLength: the whole descriptor */
     memset(f, 0, sizeof f);
