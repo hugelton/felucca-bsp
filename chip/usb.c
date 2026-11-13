@@ -1560,6 +1560,17 @@ static void ota_frame_done(void)
 }
 #endif
 
+/* the polls (ep1_tx calls) a MIDI packet may wait in the IN FIFO before the host counts as not reading (50 ms at the
+ * poll's 2 kHz). macOS polls the MIDI IN endpoint only while an app has the port open: without a reader, notes and clock
+ * filled the queues and came out later as a stale burst. Past it the FIFO is flushed and what waits is dropped (as a bus
+ * reset does), and it stays so (tx_deaf: dropped at each poll) until the host takes a packet again: the next one queued
+ * is tried (and flushed after another stall if it is not taken), so a host that starts reading gets only fresh ones.
+ * A caller that polls more often says how many make 50 ms */
+#ifndef FELUCCA_MIDI_TX_STALL_POLLS
+#define FELUCCA_MIDI_TX_STALL_POLLS 100u
+#endif
+static uint32_t tx_wait;
+static uint8_t tx_deaf, tx_tried;                       /* nobody reading; a packet sent since the last flush */
 static void ep1_tx(void)
 {
     uint32_t csr, n = 0;
@@ -1575,8 +1586,31 @@ static void ep1_tx(void)
 #endif
     sie_wr(S_INDEX, 1);
     csr = sie_rd(S_TXCSR1);
-    if (csr & 0x01u)
-        return;                                         /* previous packet still pending */
+    if (csr & 0x01u) {                                  /* previous packet still pending */
+        if (tx_wait < FELUCCA_MIDI_TX_STALL_POLLS)
+            tx_wait++;
+        else {                                          /* nobody reads: the packet in the FIFO too (MUSB FlushFIFO) */
+            sie_wr(S_TXCSR1, csr | 0x08u);
+            tx_wait = 0;
+            tx_deaf = 1;
+            tx_tried = 0;
+        }
+        if (tx_deaf) {                                  /* drop what waits (as a bus reset does): no stale burst later */
+            mo_r = mo_w;
+#if FELUCCA_OTA
+            if (!sx_busy)
+                so_r = so_w;
+#endif
+#if FELUCCA_MIRROR
+            mr_r = mr_w;
+            tx_mid = 0;
+#endif
+        }
+        return;
+    }
+    if (tx_deaf && tx_tried)                            /* the host took the packet tried since the flush: it reads */
+        tx_deaf = 0;
+    tx_wait = 0;
     if (csr & 0x80u)
         sie_wr(S_TXCSR1, csr & ~0x80u);
 #if FELUCCA_OTA
@@ -1637,6 +1671,7 @@ static void ep1_tx(void)
     fm1_usb_ep_send(1, ep1tx, n);
     sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
     usb.tx_pkts++;
+    tx_tried = 1;
 }
 
 #if FELUCCA_CDC
