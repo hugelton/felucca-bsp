@@ -824,15 +824,18 @@ static __attribute__((noinline)) void sie_wr(uint32_t r, uint32_t v)
             irq_restore(f);
             return;
         }
-        sie_index = (uint8_t)v;
+        sie_index = 0xFFu;                              /* (known again once this write is done) */
     }
 #endif
     fm1_usb_sie_wr_start(r, v);
     while (!fm1_usb_sie_done() && --n)
         ;
 #if SIE_INDEX_CACHE
-    if (r == S_INDEX)
+    if (r == S_INDEX) {
+        if (n)
+            sie_index = (uint8_t)v;                     /* (a write that timed out leaves it unknown) */
         irq_restore(f);
+    }
 #endif
     (void)f;
     if (n)
