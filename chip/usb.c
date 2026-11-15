@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
  * Copyright (C) 2026 Kerem Kilic (Ellic Studio) — USB host integration
- * MIDI clock and transport sync: keremimo (Felucca 019e2ad), under MPL-2.0 by agreement: https://github.com/hugelton/felucca-bsp/pull/3 */
+ * MIDI clock and transport sync: keremimo (Felucca 019e2ad), under MPL-2.0 by agreement: https://github.com/hugelton/felucca-bsp/pull/3
+ * Copyright (C) 2026 Julius Vitkauskas — disk mode at the host's pace (usb_msc_pump, the INDEX cache) */
 /* USB full-speed device on USB0: a
  * class-compliant USB-MIDI interface. All SIE traffic happens in one place,
  * usb_poll(), called from the TIMER5 ISR at 2 kHz, so INDEX is never shared
- * and no USB IRQ is needed. MIDI in goes to a ring the audio ISR drains;
+ * and no USB IRQ is needed; one exception: disk mode (FELUCCA_MSC) also moves
+ * EP3's packets from the main loop (usb_msc_pump), with the interrupts off,
+ * and INDEX is then written only when it changes (sie_index). MIDI in goes to a ring the audio ISR drains;
  * MIDI out (the panel keys) comes from a ring the audio ISR fills.
  * SysEx F0 22 24 35 7D F7 (the stock soft key, tools/fm1_softkey.py) asks
  * the main loop to enter UBOOT. VID 0x1209 / PID 0x0001 is the pid.codes
@@ -765,14 +768,39 @@ static int get_desc(uint32_t wvalue, const uint8_t **d, uint16_t *l)
 /* ---------------------------------------------------------- the SIE --- */
 /* out of line on purpose (felucca-bsp#14): inlined at -O2, back-to-back SIE accesses ran a few cycles apart and EP1 IN
  * stopped on the FM-1 (built at -O2 -mcpu=r3); as calls they keep the spacing every build has been tested with */
+#if FELUCCA_MSC
+#define SIE_INDEX_CACHE 1                               /* (disk mode's tight polls: one SIE access fewer a packet) */
+#else
+#define SIE_INDEX_CACHE 0                               /* (without disk mode: every INDEX written, as ever) */
+#endif
+static uint8_t sie_index = 0xFFu;                       /* the INDEX last written (0xFF: not known): written
+                                                         * again only when it changes. Every INDEX write comes through
+                                                         * sie_wr, the compare and the write with the interrupts off,
+                                                         * so the poll (ISR) and the main loop's disk pump share it;
+                                                         * forgotten at a bus reset and a restart */
 static __attribute__((noinline)) void sie_wr(uint32_t r, uint32_t v)
 {
-    uint32_t n = 20000;
+    uint32_t n = 20000, f = 0;
     if (!fm1_usb_sie_on())
         return;
+#if SIE_INDEX_CACHE
+    if (r == S_INDEX) {
+        f = irq_save();
+        if (v == sie_index) {
+            irq_restore(f);
+            return;
+        }
+        sie_index = (uint8_t)v;
+    }
+#endif
     fm1_usb_sie_wr_start(r, v);
     while (!fm1_usb_sie_done() && --n)
         ;
+#if SIE_INDEX_CACHE
+    if (r == S_INDEX)
+        irq_restore(f);
+#endif
+    (void)f;
     if (n)
         usb.timeouts = 0;                               /* consecutive failures only */
     else if (++usb.timeouts > 50u)
@@ -1653,12 +1681,13 @@ static void msc_ep3_rx(void)                            /* leaves the packet (NA
 {
     uint32_t csr, n, i;
     sie_wr(S_INDEX, 3);
-    csr = sie_rd(S_RXCSR1) | (sie_rd(S_RXCSR2) << 8);
+    csr = sie_rd(S_RXCSR1);                             /* (RxPktRdy first: the rest only with a packet there) */
     if (!(csr & 1u)) {
         msc_rx_pend = 0;
         return;
     }
-    n = sie_rd(S_RXCOUNT1) | (sie_rd(S_RXCOUNT2) << 8);
+    csr |= sie_rd(S_RXCSR2) << 8;
+    n = sie_rd(S_RXCOUNT1);                             /* (64 at most: RXCOUNT2 is 0) */
     if (n > 64u)
         n = 64u;
     if (MSI_N - (msi_w - msi_r) < n)
@@ -1690,7 +1719,7 @@ static void msc_ep3_tx(void)                            /* the segment's next pa
     for (i = 0; i < n; i++)
         ep3tx[i] = p[i];
     fm1_usb_ep_send(3, ep3tx, n);
-    sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
+    sie_wr(S_TXCSR1, (csr & ~0x80u) | 0x01u);       /* (the CSR read above: as m-apps' usbdisk, one access fewer) */
     msc_tx_p = p + n;
     RING_PUBLISH();
     msc_tx_n -= n;
@@ -1721,6 +1750,21 @@ static int usb_msc_send(const uint8_t *p, uint32_t n)   /* a segment to the host
     return 0;
 }
 static uint32_t usb_msc_resets(void) { return msc_resets; }
+/* disk mode, from the main loop: EP3's packets moved now, in and out, as the endpoint takes them. The 2 kHz poll alone
+ * moves one 64-byte packet each way a tick (128 KB/s at most); a main loop that waits on a transfer calls this to go at
+ * the host's pace. The interrupts off around it: the poll uses the same SIE index */
+static __attribute__((unused)) void usb_msc_pump(uint32_t out)   /* out: the host's packets taken, else ours sent */
+{
+    uint32_t f;
+    if (!usb_msc_ready())
+        return;
+    f = irq_save();
+    if (out)
+        msc_ep3_rx();
+    else
+        msc_ep3_tx();
+    irq_restore(f);
+}
 
 /* present the FM-1 as a disk (on) or as itself (off): main loop. As usb_cdc_switch: a change while attached drops
  * off the bus, and usb_retry attaches again within a second with the other descriptors */
@@ -2250,6 +2294,7 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
         usb.suspended = 0;
     if (iu & 0x04u) {                                   /* bus reset */
         usb.resets++;
+        sie_index = 0xFFu;
         sie_wr(S_FADDR, 0);
         usb.config = 0;
         usb.suspended = 0;
@@ -2330,6 +2375,7 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
 static void usb_start(void)                             /* boot, or main-loop retry while usb.up == 0 */
 {
     usb.timeouts = 0;
+    sie_index = 0xFFu;
     fm1_usb_reset();                                    /* reset whatever the ROM left */
     fm1_delay_ms(25);
     fm1_usb_attach(ep0buf);
