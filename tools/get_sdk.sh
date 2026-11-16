@@ -6,7 +6,7 @@
 #   SDK_URL=...   another remote (a mirror)       SDK_REV=...   another revision (the checks below then fail)
 set -e
 DEST="${1:-$HOME/.jieli/ac79-sdk}"
-URL="${SDK_URL:-https://github.com/Jieli-Tech/fw-AC79_AIoT_SDK}"
+URL="${SDK_URL:-https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git}"      # JieLi's own docs name Gitee as where the AC79 SDK is maintained; the GitHub mirror is gone
 REV="${SDK_REV:-d179b4484759423312073f5fbb232501aa491047}"      # AC79NN_SDK_V1.2.1_2023-12-13
 mkdir -p "$DEST"
 cd "$DEST"
