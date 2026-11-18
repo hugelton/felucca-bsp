@@ -21,3 +21,12 @@ for mode in long short loader; do
     echo "$mode:"
     "$OTA_TEST_DIR/$mode"
 done
+# the update record (tests/ota_record_test.c): the FM-1's staging and name, and a board's own (OTA_AREA, OTA_REC_NAME)
+# Word splitting is intentional for the fixed compiler options above.
+"${CC:-cc}" -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-function $SANITIZE tests/ota_record_test.c -o "$OTA_TEST_DIR/rec_fm1"
+echo "record, the FM-1's:"
+"$OTA_TEST_DIR/rec_fm1"
+"${CC:-cc}" -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-function $SANITIZE -DOTA_AREA=0xBB000u \
+    -DOTA_REC_NAME='"ota-SMK-37 Pro_016"' tests/ota_record_test.c -o "$OTA_TEST_DIR/rec_other"
+echo "record, another board's:"
+"$OTA_TEST_DIR/rec_other"
