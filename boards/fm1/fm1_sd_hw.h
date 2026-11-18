@@ -39,7 +39,10 @@
  *                          of 4: started (direction and interrupt kept on between transfers, for the interrupt to
  *                          start the next), acknowledged (the interrupt's first step: its writes seen), stopped
  *                          (both off, SPI1 back to bytes)
-
+ * FM1_SD_SCK_HD 1 (the build's): SCK (PC9) driven hard during the card's sessions, its usual drive back for the
+ * panel. The card's data comes back late by a fixed delay and SPI1 has no sampling delay; on one FM-1 with an earlier
+ * SD board (other resistors than m-card's) this took the fastest clock that read right from 8.57 MHz to 10. Not
+ * measured on m-card
  *   fm1_sd_timeouts        the waits that gave up (each bounded; the protocol then sees 0xFF bytes and fails)
  *
  * Port C is written here from the main loop only (as the LCD's pins are): no interrupt writes PC7..PC10. */
@@ -55,6 +58,10 @@
 #define FM1_SD_SPI_CNT (*(volatile uint32_t *)0x11D10u)
 #define FM1_SD_CS (1u << 7)               /* PC7: the panel's CS; the card's, inverted */
 #define FM1_SD_DO (1u << 8)               /* PC8: the panel's D/C; the card's DO in a session */
+#define FM1_SD_CLK (1u << 9)              /* PC9: SPI1's clock */
+#ifndef FM1_SD_SCK_HD
+#define FM1_SD_SCK_HD 0
+#endif
 #define FM1_SD_CON_LCD 0x4021u            /* SPI1 as fm1_lcd_hw.h runs it */
 #define FM1_SD_CON 0x4029u                /* the same, DI and DO on separate lines */
 #define FM1_SD_WAIT 400000u               /* polls for one byte: far above a byte at 400 kHz (~20 us) */
@@ -152,12 +159,16 @@ static void fm1_sd_open(uint32_t baud)
     FM1_PR(FM1_PC, FM1_PD) &= ~FM1_SD_DO;
     FM1_SD_SPI_CON = FM1_SD_CON;
     FM1_SD_SPI_BAUD = baud;
+    if (FM1_SD_SCK_HD)
+        FM1_PR(FM1_PC, FM1_HD) |= FM1_SD_CLK;
 }
 
 static void fm1_sd_close(uint32_t lcd_baud)
 {
     fm1_sd_select(0);
     fm1_sd_xfer(0xFFu);                      /* the card lets go of its DO */
+    if (FM1_SD_SCK_HD)
+        FM1_PR(FM1_PC, FM1_HD) &= ~FM1_SD_CLK;
     FM1_SD_SPI_CON = FM1_SD_CON_LCD;
     FM1_SD_SPI_BAUD = lcd_baud;
     FM1_PR(FM1_PC, FM1_OUT) |= FM1_SD_DO;
