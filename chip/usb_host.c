@@ -30,6 +30,7 @@ enum { S_DEVCTL = 15, S_TXTYPE = 24, S_TXINTERVAL = 25, S_RXTYPE = 26, S_RXINTER
 enum { UH_MSG_NONE, UH_MSG_ON, UH_MSG_OFF, UH_MSG_MIDI, UH_MSG_NOMIDI, UH_MSG_LOW, UH_MSG_LOST };
 #define UH_FIRST_ADDR 1u
 #define UH_MAX_ERRORS 16u
+#define UH_ROOT_TRIES 5u                                /* resets of a device that does not answer at all (uh_connect) */
 
 static uint8_t uh_rx[64 + 4] __attribute__((aligned(4)));
 static uint8_t uh_cfg[320];                                  /* a configuration, cut short if longer */
@@ -42,6 +43,7 @@ static struct {
     uint8_t hub_addr, hub_mps, hub_ports, hub_poll_port;
     uint8_t in_ep, out_mps, tx_count, tx_errors, line_idle;
     uint8_t msg;                                        /* one UH_MSG_* for the application */
+    uint8_t answered;                                   /* the device on the root port answered its first request (uh_connect) */
     volatile uint8_t errors;
     uint32_t t_ms, retry_ms;
     uint32_t tx_ms, hub_poll_ms;
@@ -191,6 +193,8 @@ static int uh_probe(uint8_t depth, uh_midi_t *m)
     r = uh_ctl(0, 0x80, 6, 0x0100, 0, 8, d8, 8);        /* GET_DESCRIPTOR(device), first 8 bytes */
     if (r < 8)
         return 0;
+    if (!depth)
+        uh.answered = 1;
     mps = d8[7] == 16u || d8[7] == 32u || d8[7] == 64u ? d8[7] : 8u;
     cls = d8[4];
     if (uh_ctl(0, 0x00, 5, addr, 0, 0, 0, mps) < 0)     /* SET_ADDRESS */
@@ -360,18 +364,29 @@ static void uh_host_up(void)
 static void uh_connect(void)
 {
     uh_midi_t m;
+    uint32_t t;
+    int ok = 0;
     if (sie_rd(S_DEVCTL) & 0x20u) {                     /* low speed (FSDev is bit 6, LSDev bit 5) */
         if (!uh.tried)
             uh.msg = UH_MSG_LOW;                        /* said once per attach, as NO MIDI is */
         uh.tried = 1;
         return;
     }
-    sie_wr(S_POWER, 0x08u);                             /* bus reset */
-    uh_wait(30);
-    sie_wr(S_POWER, 0);
-    uh_wait(30);
-    uh.next_addr = UH_FIRST_ADDR;
-    if (uh_probe(0, &m)) {
+    /* A root reset of 50 ms (USB 2.0 TDRSTR), then the device's recovery. A device that does not answer its first request
+     * at all is reset again with a longer recovery (100, 200, 400, 800, 1600 ms): an Elektron Digitone II answers nothing
+     * after 30 ms of reset and 30 ms of recovery. One that answered and failed later is not reset again. (Melodee's
+     * 6e615760 does the same for hubs slow to start.) */
+    for (t = 0; t < UH_ROOT_TRIES; t++) {
+        sie_wr(S_POWER, 0x08u);                         /* bus reset */
+        uh_wait(50);
+        sie_wr(S_POWER, 0);
+        uh_wait(100u << t);
+        uh.next_addr = UH_FIRST_ADDR;
+        uh.answered = 0;
+        if ((ok = uh_probe(0, &m)) || uh.answered)
+            break;
+    }
+    if (ok) {
         uh_start_ep(&m);
         uh.msg = UH_MSG_MIDI;
         uh.tried = 0;
