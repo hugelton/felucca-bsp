@@ -14,7 +14,7 @@
  *     a flick (1.6 states a frame, once moving), all counted; the fastest even turn that keeps every step printed;
  *   - the LEDs: a lit LED lit about one tick every frame, the glow every frame at FM1_LED_DIM_NS (+-30 %), the mid
  *     level lit 1 frame in FM1_LED_MID_N, the breath's period (~1.1 s) and the power-on sweep's length (~0.7 s) in
- *     time, the refresh of each printed.
+ *     time, the refresh of each printed; the UI's levels (fm1_led_levels_start) lit q frames in 64, a key held.
  * Not the look of the LEDs (only an FM-1 shows that), nor the analog rows. */
 #include <stdint.h>
 #include <stdio.h>
@@ -529,6 +529,40 @@ static void leds(void)
             key_c[23].on = 0;
             run_ms(50);
         }
+    }
+
+    /* the UI's levels (fm1_led_levels_start): an LED at level q of 64 lit about q frames in 64 (the sweep's
+     * sigma-delta), a key held does not end them, not the idle animation, ended by fm1_led_anim_stop */
+    {
+        static const uint8_t ID[4] = {0, 1, 2, 3}, LV[4] = {64, 32, 16, 0};
+        uint32_t k, f, lit[4] = {0}, nfr = 64u * 16u, fl[2] = {0, US(20000000)};
+        for (k = 0; k < FM1_NKEY; k++)
+            fm1_led_lv[k] = 0;
+        for (k = 0; k < 4u; k++)
+            fm1_led_lv[ID[k]] = LV[k];
+        fm1_led_levels_start();
+        contact(23, next_tick, fl, 2);             /* a key held all the while */
+        run_ms(50);
+        frame_sync();
+        for (k = 0; k < 4u; k++)
+            (void)take_on(fm1__an_cb[ID[k]] >> 3, fm1__an_cb[ID[k]] & 7u);
+        for (f = 0; f < nfr; f++) {
+            uint32_t i;
+            for (i = 0; i < FM1_NCOL; i++)
+                tick();
+            for (k = 0; k < 4u; k++)
+                if (take_on(fm1__an_cb[ID[k]] >> 3, fm1__an_cb[ID[k]] & 7u) > T4_TICK / 2u)
+                    lit[k]++;
+        }
+        snprintf(b, sizeof b, "the UI's levels, a key held: lit frames of %u at 64 32 16 0: %u %u %u %u",
+                 (unsigned)nfr, (unsigned)lit[0], (unsigned)lit[1], (unsigned)lit[2], (unsigned)lit[3]);
+        want(b, fm1_led_levels_on() && !fm1_led_idle_on() && lit[0] >= nfr * 95u / 100u &&
+                lit[1] > nfr * 45u / 100u && lit[1] < nfr * 55u / 100u && lit[2] > nfr * 20u / 100u &&
+                lit[2] < nfr * 30u / 100u && lit[3] == 0u);
+        key_c[23].on = 0;
+        fm1_led_anim_stop();
+        want("  (ended by fm1_led_anim_stop)", !fm1_led_levels_on());
+        run_ms(50);
     }
 }
 
