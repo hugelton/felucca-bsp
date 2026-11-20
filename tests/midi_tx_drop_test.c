@@ -3,9 +3,10 @@
 /* MIDI IN to the host when nobody reads it (chip/usb.c ep1_tx, FELUCCA_MIDI_TX_STALL_POLLS), the production code on the
  * host with the SIE mocked: the IN FIFO holds a packet until the host takes it. Checked:
  *   - while the host reads, every packet the app queues goes out in order, none dropped;
- *   - when the host stops reading (macOS: no app has the port open), the FIFO is flushed after
- *     FELUCCA_MIDI_TX_STALL_POLLS polls and from then on the rings are dropped at every poll; one packet is tried each
- *     stall, so the ring never holds more than a poll's worth of stale notes and clocks;
+ *   - when the host stops reading (macOS: no app has the port open), after FELUCCA_MIDI_TX_STALL_POLLS polls the notes
+ *     and clocks are dropped at every poll, so the ring never holds more than a poll's worth of stale ones; the FIFO is
+ *     never flushed and nothing more is sent until the host takes the packet in it;
+ *   - a SysEx answer queued meanwhile is kept, and goes out first when the host reads again;
  *   - when the host reads again, the next packet goes out at once with only what was queued since (no stale burst);
  *   - a bus reset in between leaves nothing behind either. */
 #include <assert.h>
@@ -93,26 +94,32 @@ int main(void)
     }
     assert(got == 200u && flushes == 0);
 
-    /* 2. the host stops reading: the FIFO stays full; after the stall polls it is flushed once, the ring dropped */
+    /* 2. the host stops reading: the FIFO stays full, never flushed; after the stall polls the ring is dropped */
     host_reads = 0;
     assert(midi_out_try(note(1000)));
     poll();                                             /* (this one goes into the FIFO) */
     assert(fifo_full);
     for (k = 0; k < FELUCCA_MIDI_TX_STALL_POLLS - 1u; k++) { (void)midi_out_try(note(2000 + k)); poll(); }
-    assert(flushes == 0 && fifo_full);                 /* (not before the stall) */
+    assert(!tx_deaf && mo_w - mo_r > 1u);              /* (not before the stall) */
     for (k = 0; k < 3u; k++) { (void)midi_out_try(note(2500 + k)); poll(); }
-    assert(flushes == 1);
-    {   const int before = sent_pkts, f0 = flushes;
+    assert(tx_deaf && mo_w == mo_r);
+    {   const int before = sent_pkts;
         const uint32_t polls = 10u * (FELUCCA_MIDI_TX_STALL_POLLS + 2u);
         for (k = 0; k < polls; k++) { assert(midi_out_try(note(3000 + k))); poll(); assert(mo_w - mo_r <= 1u); }   /* (the ring never fills) */
-        assert(sent_pkts - before <= (int)(polls / FELUCCA_MIDI_TX_STALL_POLLS) + 1);   /* (one try a stall) */
-        assert(flushes - f0 >= (int)(polls / (FELUCCA_MIDI_TX_STALL_POLLS + 2u)) - 1);
+        assert(sent_pkts == before && fifo_full);      /* (nothing more sent: the packet waits in the FIFO) */
     }
+    {   static const uint8_t answer[5] = {0xF0, 0x7D, 0x01, 0x02, 0xF7};   /* an answer to the host's request */
+        assert(ota_wire_send(answer, sizeof answer) == 0);
+        for (k = 0; k < 10u; k++) { (void)midi_out_try(note(3500 + k)); poll(); }
+        assert(so_w - so_r == 2u && mo_w == mo_r);     /* (kept, while the notes are dropped) */
+    }
+    assert(flushes == 0);
 
-    /* 3. the host reads again: the next packet holds only what was queued since */
+    /* 3. the host reads again (it took the packet in the FIFO): the SysEx answer first, then only what was queued since */
     host_reads = 1;
     fifo_full = 0;
     poll();
+    assert(!tx_deaf && so_w == so_r && last_n == 8u && last_pkt[0] == 4u && last_pkt[1] == 0xF0u && last_pkt[4] == 6u);
     last_n = 0;
     assert(midi_out_try(note(4000)));
     poll();
