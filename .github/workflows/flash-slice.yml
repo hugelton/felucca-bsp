@@ -1,0 +1,15 @@
+name: Flash slice test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  flash-slice:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The sliced sector erase on a model of the P25Q80H
+        env:
+          CC: clang
+        run: tests/run_flash_slice_test.sh
