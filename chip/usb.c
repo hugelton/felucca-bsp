@@ -1622,7 +1622,7 @@ static void ota_frame_done(void)
 #endif
 static uint32_t tx_wait;
 static uint8_t tx_deaf;                                 /* nobody reading: notes, clock and frames dropped */
-static void ep1_tx(void)
+static void ep1_tx_(uint32_t pump)                     /* pump: the main loop's call (usb_mirror_pump), not the poll */
 {
     uint32_t csr, n = 0;
 #if FELUCCA_MIRROR
@@ -1638,6 +1638,8 @@ static void ep1_tx(void)
     sie_wr(S_INDEX, 1);
     csr = sie_rd(S_TXCSR1);
     if (csr & 0x01u) {                                  /* previous packet still pending */
+        if (pump)
+            return;                                     /* (the stall counts the poll's waits only: a pump calls fast) */
         if (tx_wait < FELUCCA_MIDI_TX_STALL_POLLS)
             tx_wait++;
         else
@@ -1714,6 +1716,21 @@ static void ep1_tx(void)
     sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
     usb.tx_pkts++;
 }
+static void ep1_tx(void) { ep1_tx_(0); }
+#if FELUCCA_MIRROR
+/* the screen mirror, from the main loop: EP1's next packet now if the last has gone (the 2 kHz poll alone sends at most
+ * two a millisecond; the host takes more). Notes and SysEx still go first: the same sender. The interrupts off around
+ * it: the poll uses the same SIE index */
+static __attribute__((unused)) void usb_mirror_pump(void)
+{
+    uint32_t f;
+    if (!usb.config || mr_r == mr_w)
+        return;
+    f = irq_save();
+    ep1_tx_(1);
+    irq_restore(f);
+}
+#endif
 
 #if FELUCCA_CDC
 static void ep3_rx(void)                                /* leaves the packet (NAK) while the ring is full */
