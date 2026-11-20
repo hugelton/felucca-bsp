@@ -34,6 +34,10 @@ firmware/hal/fm1_cache.h, f16f6683 and 9a1360ab), offered there under GPL-3.0-on
 "The cache RAM", 3815869f) and taken here under MPL-2.0; its register addresses and sequence are the AC79 SDK's
 (Apache-2.0). tests/cache_ram_test.c: Copyright (C) 2026 Henri David, MPL-2.0.
 
+The USB audio options (the options' code in chip/usb.c, chip/uac_hc_fir.h, tools/uac_hc_fir.py which writes it, and
+tests/uac_test.c): Copyright (C) 2026 Henri David (hdavid), from Optimist (https://github.com/w0ts/optimist), MPL-2.0 here.
+The output's explicit feedback follows the one Optimist has from Melodee (keremimo), which is credited in the code.
+
 Unofficial. Not affiliated with or endorsed by M-VAVE or JieLi.
 
 USB MIDI host (chip/usb_host.c, chip/usb_host_desc.h, the host additions in chip/fm1_usb.h,

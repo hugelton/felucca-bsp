@@ -57,7 +57,7 @@ LOADER_MARK = b"FELUCCA-LOADER-1"
 # the unmodified official FM-1 V15 (FM-1.fwsc from M-VAVE): returning to it is allowed without --force,
 # as Felucca's web installer does
 STOCK_V15_SHA256 = "db1642b2b6fa5c2cccb11ffd13878068bb28601678d3644049f99dc40e7edb8a"
-PORT_RE = re.compile(r"fm-1|felucca|ota|composite|sinco|usb-midi", re.I)   # never probe other gear
+PORT_RE = re.compile(r"fm-?1|felucca|ota|composite|sinco|usb-midi", re.I)   # never probe other gear (fm-?1: "FM-1" and "FM1-XXXX")
 
 # seconds; the tests shorten them
 DELAY = {"open": 0.3, "start": 2.0, "start_fast": 0.05, "fast_hello": 0.5, "reply": 0.01, "loader": 3.0, "reboot": 3.0,
