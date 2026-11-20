@@ -12,7 +12,10 @@
  * The rule each erase / program is held to (stricter than loader.c's FL_RANGE_OK):
  *   never [0, 0x4000) (the boot area), never [0xE0000, 0xE4000) (the staged loader), never [0xFC000, 0x100000)
  *   (globals, key_mac), never the staging's last sector 0xE4000 (the record 0xE4F00) before the finish;
- *   before the finish: the app area [0x4000, FL_APP_END), and with LDR_SLOT_SWITCH erases in [FL_APP_END, 0xE0000);
+ *   before the finish: the app area [0x4000, FL_APP_END), and with LDR_SLOT_SWITCH erases in [FL_APP_END, 0xE0000),
+ *   but only inside the window ldr_slot_switch opens around them (ldr_res_window, as for the resource region);
+ *   the flash model refuses (returns -1, as the driver does) what loader.c's predicate (loader/ldr_range.h) refuses,
+ *   the loader's own, the window included, so the loader must succeed with exactly that;
  *   before the finish, also the sectors of the resource region (a package's res.bin entry) while ldr_core.c holds them
  *   open (ldr_res_window), and only those: the window must be the package's region, whole sectors of the data area;
  *   in the finish (after ldr_record_clear): erase 0xE4000; program zeros (<= 80 B) over an update record that was
@@ -24,6 +27,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "fm1_flash_policy.h"                            /* FL_IN, FL_DATA_LO */
+#include "../loader/ldr_range.h"                         /* the loader's own driver guard (loader.c's FL_RANGE_OK) */
 
 #define FELUCCA_ID "ota-FM-1_900"
 #define FELUCCA_OTA_DRYRUN 0
@@ -155,10 +160,13 @@ static void ota_commit(const uint8_t *parm) { (void)parm; }
 #include "../chip/ota.c"
 
 /* ---- the flash: every erase / program checked and counted; a cut (longjmp) or a failure at op cut_at / fail_at ---- */
+static uint32_t w_lo, w_hi;                              /* the window ldr_core.c opens (a resource region, a slot switch's erases) */
 static int flash_op(int kind, uint32_t off, const uint8_t *p, uint32_t n)
 {
     uint32_t i;
     tb_op(kind, off, p, n);
+    if (off < NOR_SIZE && !LDR_RANGE_OK(off, n, w_lo, w_hi))
+        return -1;                                       /* (the driver refuses: tb_op counted it as a violation if it is one) */
     if (op_index == fail_at) {
         op_index++;
         return -1;
@@ -200,15 +208,7 @@ static void ldr_record_clear(void)                       /* the finish starts he
 static int ldr_erase_begin(uint32_t off) { return flash_op(OP_ERASE_BEGIN, off, 0, 0x1000); }
 static int ldr_erase_end(void) { return 0; }
 static void ldr_progress(uint32_t done, uint32_t total) { (void)done; (void)total; }
-static uint32_t w_lo, w_hi;                              /* the resource region's window, as ldr_core.c opens it */
 static void viol(const char *why, int kind, uint32_t off, uint32_t n);
-static void ldr_res_window(uint32_t lo, uint32_t hi)
-{
-    if (hi && (lo != h_res_base || hi - lo != h_res_size || lo < 0x97000u || hi > 0xE0000u || (lo | hi) & 0xFFFu))
-        viol("a resource window that is not the package's region in the data area", OP_ERASE, lo, hi - lo);
-    w_lo = lo;
-    w_hi = hi;
-}
 #include "../loader/ldr_core.c"
 
 #if defined(LDR_SLOT_SWITCH) && LDR_SLOT_SWITCH
@@ -217,6 +217,17 @@ static void ldr_res_window(uint32_t lo, uint32_t hi)
 #define SWITCH 0
 #endif
 #define APP_HI LDR_APP_HI
+
+static void ldr_res_window(uint32_t lo, uint32_t hi)
+{
+    if (hi && (lo | hi) & 0xFFFu)
+        viol("a window not on whole sectors", OP_ERASE, lo, hi - lo);
+    else if (hi && !(SWITCH && lo >= LDR_APP_HI && hi <= LDR_DATA_HI) &&   /* (a slot switch's erases: above the app area) */
+             (lo != h_res_base || hi - lo != h_res_size || lo < 0x97000u || hi > 0xE0000u))
+        viol("a window that is neither the package's region in the data area nor the slot switch's", OP_ERASE, lo, hi - lo);
+    w_lo = lo;
+    w_hi = hi;
+}
 
 static void viol(const char *why, int kind, uint32_t off, uint32_t n)
 {
@@ -245,8 +256,8 @@ static void tb_op(int kind, uint32_t off, const uint8_t *p, uint32_t n)
             return;
         if (w_hi && off >= w_lo && end <= w_hi && kind != OP_ERASE_BEGIN)
             return;                                      /* the resource region, open */
-        if (SWITCH && kind == OP_ERASE && off >= APP_HI && end <= LDR_DATA_HI)
-            return;                                      /* the slot switch's clear */
+        if (SWITCH && kind == OP_ERASE && off >= APP_HI && end <= LDR_DATA_HI && w_hi && off >= w_lo && end <= w_hi)
+            return;                                      /* the slot switch's clear, inside its window */
         viol("outside the app area", kind, off, n);
         return;
     }
@@ -335,7 +346,7 @@ typedef struct {
     uint32_t res_len, res_base, res_seed;                /* a res.bin entry: its payload's length, where it goes */
     int res_flip, res_bad;                               /* its payload damaged on the way; its record's CRC wrong */
 } pkg_t;
-#define RES_BASE 0xAB000u                                /* Polly's */
+#define RES_BASE (LDR_DATA_LO > 0xAB000u ? LDR_DATA_LO : 0xAB000u)   /* Polly's, or the data area's start past a bigger app */
 #define RES_LEN 0xA9E0u                                  /* 11 sectors with its record */
 #define FLIP_AT (0x7000u + 5u)                           /* in sector 7: one the package changes (7 % 3 == 1) */
 
