@@ -35,6 +35,8 @@
  * FELUCCA_MSC=1 adds a disk mode: usb_msc_switch(1) drops off the bus and comes back as a USB mass-storage device
  * (bulk-only transport, EP3 bulk in and out; nothing else: no MIDI, no audio) until usb_msc_switch(0). The poll
  * only moves packets: the commands (SCSI) and the disk are the main loop's (usb_msc_read, usb_msc_send).
+ * FELUCCA_MIDI_RT=1 adds usb_midi_rt: MIDI clock ticks and transport sent to the host at once, from the firmware's own
+ * fast tick (usb_midi_rt_kick, below). Off by default: the ring and the kick in usb_poll are not built.
  * FELUCCA_MIDI_IN_RAW, a function of the firmware's (void f(uint32_t pkt)), is given every EP1 OUT event packet as
  * it came, for a MIDI parser of its own (midi_in_event). */
 #include "fm1_usb.h"   /* registers (chip/) */
@@ -1620,19 +1622,30 @@ static void ota_frame_done(void)
 #ifndef FELUCCA_MIDI_TX_STALL_POLLS
 #define FELUCCA_MIDI_TX_STALL_POLLS 100u
 #endif
+#ifndef FELUCCA_MIDI_RT
+#define FELUCCA_MIDI_RT 0
+#endif
+#if FELUCCA_MIDI_RT
+#define RTN 8u
+static uint32_t rt_q[RTN];                              /* the real-time ring (usb_midi_rt, below) */
+static uint32_t rt_qw, rt_qr;
+#define TX_IDLE(c) ((c) && rt_qr == rt_qw)               /* ticks waiting count as work: the stall must see them too */
+#else
+#define TX_IDLE(c) (c)
+#endif
 static uint32_t tx_wait;
 static uint8_t tx_deaf;                                 /* nobody reading: notes, clock and frames dropped */
 static void ep1_tx_(uint32_t pump)                     /* pump: the main loop's call (usb_mirror_pump), not the poll */
 {
     uint32_t csr, n = 0;
 #if FELUCCA_MIRROR
-    if (mo_w == mo_r && so_w == so_r && mr_w == mr_r)
+    if TX_IDLE(mo_w == mo_r && so_w == so_r && mr_w == mr_r)
         return;
 #elif FELUCCA_OTA
-    if (mo_w == mo_r && so_w == so_r)
+    if TX_IDLE(mo_w == mo_r && so_w == so_r)
         return;
 #else
-    if (mo_w == mo_r)
+    if TX_IDLE(mo_w == mo_r)
         return;
 #endif
     sie_wr(S_INDEX, 1);
@@ -1646,6 +1659,9 @@ static void ep1_tx_(uint32_t pump)                     /* pump: the main loop's 
             tx_deaf = 1;                                /* nobody reads (the packet stays in the FIFO) */
         if (tx_deaf) {                                  /* drop what waits (as a bus reset does): no stale burst later */
             mo_r = mo_w;
+#if FELUCCA_MIDI_RT
+            rt_qr = rt_qw;                              /* (and the clock ticks waiting for a packet) */
+#endif
 #if FELUCCA_MIRROR
             mr_r = mr_w;
             tx_mid = 0;
@@ -2402,6 +2418,70 @@ static void uac_service(void)
 }
 #endif
 
+#if FELUCCA_MIDI_RT
+/* Real-time messages sent at once (usb_midi_rt): a MIDI clock tick loaded into EP1 the moment it is due, not at the next
+ * 2 kHz poll, and not held while the poll waits for the audio render (usb_poll never runs nested; a tick could wait out
+ * a whole render). Measured on a Mac before this: a clock out through midi_out_q, released by a 1 kHz tick, scattered
+ * 418 us (sd) around its own line, up to 1.5 ms. Called from the TIMER5 tick (0.1 ms), nested in the render or not:
+ * the only other SIE user, usb_poll, runs in the same interrupt, never inside it, and sets INDEX itself. One producer
+ * (the tick), so the ring needs no lock. While a packet is still on EP1 (TxPktRdy), what is waiting goes at the next
+ * tick (usb_midi_rt_kick) or the poll, ahead of midi_out_q. USB-MIDI packets are whole events, so one between two of
+ * a SysEx message is legal. When the host does not read (tx_deaf), the ring is dropped with midi_out_q (ep1_tx). */
+static uint8_t ep1rt[4u * RTN] __attribute__((aligned(4)));
+static void usb_midi_rt_kick(void)
+{
+    uint32_t csr, n = 0;
+    if (rt_qr == rt_qw)
+        return;
+#if FELUCCA_USB_HOST
+    if (uh.on) {
+        rt_qr = rt_qw;                                  /* (no computer on the port: nothing to send to) */
+        return;
+    }
+#endif
+#if FELUCCA_MSC
+    if (usb_msc_on) {
+        rt_qr = rt_qw;
+        return;
+    }
+#endif
+    if (!usb.up || !usb.config) {
+        rt_qr = rt_qw;
+        return;
+    }
+    sie_wr(S_INDEX, 1);
+    csr = sie_rd(S_TXCSR1);
+    if (csr & 0x01u)
+        return;                                         /* the last packet not taken yet: the next tick */
+    tx_deaf = 0;                                        /* the host took the packet: it reads (as in ep1_tx) */
+    tx_wait = 0;
+    if (csr & 0x80u)
+        sie_wr(S_TXCSR1, csr & ~0x80u);
+    while (rt_qr != rt_qw) {
+        uint32_t pkt = rt_q[rt_qr % RTN];
+        ep1rt[n] = (uint8_t)pkt;
+        ep1rt[n + 1] = (uint8_t)(pkt >> 8);
+        ep1rt[n + 2] = (uint8_t)(pkt >> 16);
+        ep1rt[n + 3] = (uint8_t)(pkt >> 24);
+        n += 4u;
+        rt_qr++;
+    }
+    fm1_usb_ep_send(1, ep1rt, n);
+    sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
+    usb.tx_pkts++;
+}
+/* a USB-MIDI packet (a clock tick, Start, Stop) to the computer now; 0 when 8 are already waiting (dropped) */
+static __attribute__((unused)) int usb_midi_rt(uint32_t pkt)
+{
+    if (rt_qw - rt_qr >= RTN)
+        return 0;
+    rt_q[rt_qw % RTN] = pkt;
+    rt_qw++;
+    usb_midi_rt_kick();
+    return 1;
+}
+#endif
+
 static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
 {
     uint32_t iu, it, ir;
@@ -2520,8 +2600,15 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
         usb.rx_pend = 1;
     if (usb.rx_pend)                                    /* not every poll: 3 SIE round trips each */
         ep1_rx();
+#if FELUCCA_MIDI_RT
+    if (usb.config) {
+        usb_midi_rt_kick();                             /* (real-time first: usb_midi_rt) */
+        ep1_tx();
+    }
+#else
     if (usb.config)
         ep1_tx();
+#endif
 #if FELUCCA_CDC
     if (usb.config && usb_cdc_on) {
         if (ir & 0x08u)
