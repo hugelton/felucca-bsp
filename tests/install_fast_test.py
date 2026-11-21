@@ -274,8 +274,9 @@ def main():
         flash, image = device(fast_exe, f"res-{how}", res=True)
         dev = Loader(fast_exe, flash)
         err, bar = write(dev, image, classic=not fast)
+        rc = dev.wait()                             # (the loader done: its record's sector erased before the flash is read)
         nor = Path(flash).read_bytes()
-        ok(err is None and dev.wait() == 0 and done(flash, image) and (bar == sorted(bar) or not fast)
+        ok(err is None and rc == 0 and done(flash, image) and (bar == sorted(bar) or not fast)
            and nor[RES_BASE:RES_BASE + RES_SIZE] == image[RES_OFF:RES_OFF + RES_SIZE],
            f"{how} install with res.bin: the region written after the app, at {RES_BASE:#x}")
         subprocess.run([fast_exe, "rearm", flash], check=True)
