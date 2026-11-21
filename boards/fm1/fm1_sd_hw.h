@@ -34,6 +34,15 @@
  *   fm1_sd_park()          PC8 high: the panel's D/C between transfers, the level the card's DO idles at while
  *                          the card is selected (the panel deselected), so the two don't pull against each other
  *                          through the 220 R
+ *   fm1_sd_rx_irq_start(p, n), fm1_sd_rx_irq_ack(), fm1_sd_rx_irq_stop()
+ *                          a receive by DMA whose end raises SPI1's interrupt (FM1_IRQ_SPI1; CON b13), n a multiple
+ *                          of 4: started (direction and interrupt kept on between transfers, for the interrupt to
+ *                          start the next), acknowledged (the interrupt's first step: its writes seen), stopped
+ *                          (both off, SPI1 back to bytes)
+ * FM1_SD_SCK_HD 1 (the build's): SCK (PC9) driven hard during the card's sessions, its usual drive back for the
+ * panel. The card's data comes back late by a fixed delay and SPI1 has no sampling delay; on one FM-1 with an earlier
+ * SD board (other resistors than m-card's) this took the fastest clock that read right from 8.57 MHz to 10. Not
+ * measured on m-card
  *   fm1_sd_timeouts        the waits that gave up (each bounded; the protocol then sees 0xFF bytes and fails)
  *
  * Port C is written here from the main loop only (as the LCD's pins are): no interrupt writes PC7..PC10. */
@@ -49,6 +58,10 @@
 #define FM1_SD_SPI_CNT (*(volatile uint32_t *)0x11D10u)
 #define FM1_SD_CS (1u << 7)               /* PC7: the panel's CS; the card's, inverted */
 #define FM1_SD_DO (1u << 8)               /* PC8: the panel's D/C; the card's DO in a session */
+#define FM1_SD_CLK (1u << 9)              /* PC9: SPI1's clock */
+#ifndef FM1_SD_SCK_HD
+#define FM1_SD_SCK_HD 0
+#endif
 #define FM1_SD_CON_LCD 0x4021u            /* SPI1 as fm1_lcd_hw.h runs it */
 #define FM1_SD_CON 0x4029u                /* the same, DI and DO on separate lines */
 #define FM1_SD_WAIT 400000u               /* polls for one byte: far above a byte at 400 kHz (~20 us) */
@@ -146,12 +159,16 @@ static void fm1_sd_open(uint32_t baud)
     FM1_PR(FM1_PC, FM1_PD) &= ~FM1_SD_DO;
     FM1_SD_SPI_CON = FM1_SD_CON;
     FM1_SD_SPI_BAUD = baud;
+    if (FM1_SD_SCK_HD)
+        FM1_PR(FM1_PC, FM1_HD) |= FM1_SD_CLK;
 }
 
 static void fm1_sd_close(uint32_t lcd_baud)
 {
     fm1_sd_select(0);
     fm1_sd_xfer(0xFFu);                      /* the card lets go of its DO */
+    if (FM1_SD_SCK_HD)
+        FM1_PR(FM1_PC, FM1_HD) &= ~FM1_SD_CLK;
     FM1_SD_SPI_CON = FM1_SD_CON_LCD;
     FM1_SD_SPI_BAUD = lcd_baud;
     FM1_PR(FM1_PC, FM1_OUT) |= FM1_SD_DO;
@@ -162,6 +179,27 @@ static void fm1_sd_close(uint32_t lcd_baud)
 }
 
 FM1_INLINE void fm1_sd_park(void) { FM1_PR(FM1_PC, FM1_OUT) |= FM1_SD_DO; }
+
+FM1_INLINE void fm1_sd_rx_irq_start(void *p, uint32_t n)
+{
+    FM1_SD_SPI_CON |= 0x1000u | 0x2000u;  /* in, the interrupt on */
+    FM1_SD_SPI_CON |= 0x4000u;
+    FM1_SD_SPI_ADR = (uint32_t)(uintptr_t)p;
+    fm1_sd_sync();
+    FM1_SD_SPI_CNT = n;
+}
+
+FM1_INLINE void fm1_sd_rx_irq_ack(void)
+{
+    FM1_SD_SPI_CON |= 0x4000u;
+    __asm__ volatile("ssync" ::: "memory");   /* (the DMA's writes seen before its buffer is read) */
+}
+
+FM1_INLINE void fm1_sd_rx_irq_stop(void)
+{
+    FM1_SD_SPI_CON &= ~(0x1000u | 0x2000u);
+    FM1_SD_SPI_CON |= 0x4000u;
+}
 
 /* whether SPI1's DMA may use p for a transfer: 4-byte aligned, in the main RAM below its reserved top (not the
  * flash, not the cache's RAM) */
