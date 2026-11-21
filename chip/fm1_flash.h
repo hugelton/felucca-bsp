@@ -169,7 +169,7 @@ RAMINL void fl_reset_busy(void)
 
 /* ---- entry points: IRQs OFF, args/buffers in RAM ---- */
 
-static RAMFN uint32_t fl_jedec_ram(void)                 /* expect 0x856014 */
+static RAMFN uint32_t fl_jedec_ram(void)                 /* 0x856014 (Puya P25Q80) or 0xB36014 (UC25HQ80) */
 {
     fl_saved_t s; uint32_t id;
     if (fl_enter(&s)) return 0;
