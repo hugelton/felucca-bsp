@@ -79,7 +79,7 @@ static void devices_init(void)
 }
 
 /* --------------------------------------------------- the SIE and bus --- */
-static uint8_t regs[5][32], common[16], index_reg, rsp[512];     /* EP0..EP4 (EP4: the audio stream) */
+static uint8_t regs[8][32], common[16], index_reg, rsp[512];
 static uint32_t rsp_len, rsp_pos, ep_cnt[5];
 static void *ep_radr[5];
 static void *ep_tadr[5];
@@ -433,11 +433,11 @@ static uint32_t check_descriptors(int cdc_on, int verbose)
 #endif
     assert(get_desc(0x0100, &dv, &dl) && dl == 18 && dv[0] == 18 && dv[1] == 1);
 #ifdef TEST_SERIAL
-    {   /* the serial number: string 3, the function's, whole */
+    {   /* the serial number: string USB_STR_SERIAL (0x30 on our line, clear of the audio's names), the function's, whole */
         const uint8_t *sd;
         uint16_t sl;
-        assert(dv[16] == 3);
-        assert(get_desc(0x0303, &sd, &sl) && sd[1] == 3 && sl == sd[0] && sl == 2u + 2u * 16u);
+        assert(dv[16] == USB_STR_SERIAL);
+        assert(get_desc(0x0300 | USB_STR_SERIAL, &sd, &sl) && sd[1] == 3 && sl == sd[0] && sl == 2u + 2u * 16u);
         for (uint32_t j = 0; j < 16u; j++)
             assert(sd[2 + 2 * j] == (uint8_t)"0123456789ABCDEF"[j] && sd[3 + 2 * j] == 0);
     }
@@ -1215,6 +1215,11 @@ int main(void)
  * (24 MHz) 2,500 */
 static uint32_t pace_rand = 12345u;
 static uint32_t pace_rnd(uint32_t n) { pace_rand = pace_rand * 1103515245u + 12345u; return (pace_rand >> 8) % n; }
+#if UA_MC || UA_IN_PLAIN
+#define UAC_PKT(p) uac_packet(p)
+#else
+#define UAC_PKT(p) uac_packet((uint8_t *)(p), 0)   /* (the general input: the packet as bytes, 16-bit) */
+#endif
 static void test_uac_pace(int r48, int32_t ppm, uint32_t lag_q16)
 {
     const uint64_t MS = 60000000u, REND = 174080000u + (uint64_t)((int64_t)174080 * ppm / 1000), POLL = REND * 12000u / (HALF_FRAMES * 544u);
@@ -1283,7 +1288,7 @@ static void test_uac_pace(int r48, int32_t ppm, uint32_t lag_q16)
         } else {                                        /* a poll (2 kHz on the crystal): queue the next packet */
             if (!q) {
                 uint32_t a0 = uac.adj_up + uac.adj_down, adj;
-                n_q = uac_packet(pk);
+                n_q = UAC_PKT(pk);
                 q = 1;
                 adj = uac.adj_up + uac.adj_down - a0;
                 adjs += adj;
@@ -1331,7 +1336,7 @@ static void test_uac_hold(void)
         out[2u * k] = (int32_t)(k + 1u) << 8, out[2u * k + 1u] = 0;
     uac_tap(out, HALF_FRAMES);
     for (i = 0; i < 40u; i++) {                         /* the packets: past the ring's end, and two more */
-        n = uac_packet(pk);
+        n = UAC_PKT(pk);
         for (k = 0; k < n; k++) {
             uint32_t v = pk[k] & 0xFFFFu;
             if (!v && next == 1u)
@@ -1349,7 +1354,7 @@ static void test_uac_hold(void)
         out[2u * k] = (int32_t)(HALF_FRAMES + k + 1u) << 8;
     uac_tap(out, HALF_FRAMES);
     for (i = 0; i < 2u; i++) {
-        n = uac_packet(pk);
+        n = UAC_PKT(pk);
         for (k = 0; k < n; k++) {
             uint32_t v = pk[k] & 0xFFFFu;
             assert(v == next || (v == prev && uac.owe + n > k));   /* (the hold's rest, then the frames in order) */
