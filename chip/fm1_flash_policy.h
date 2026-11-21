@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MPL-2.0
- * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
+ * Copyright (C) 2026 Kerem Kilic (Ellic Studio)
+ * Copyright (C) 2026 hdavid (FL_APP_END: a firmware's bigger app area) */
 /* Flash capacity and application-owned write regions. No register accesses.
  * Define FM1_FLASH_WRITE_REGIONS(X) before inclusion, for example:
  *   #define FM1_FLASH_WRITE_REGIONS(X) X(0x97000u, 0xA0000u)
@@ -20,9 +21,16 @@
 #ifndef FM1_FLASH_XIP_SIZE
 #define FM1_FLASH_XIP_SIZE 0x100000u
 #endif
-#ifndef FM1_FLASH_PLAIN_LO
-#define FM1_FLASH_PLAIN_LO 0x93000u
+/* the app area's end: the update loader writes [0x4000, FL_APP_END). 0x93000, or a firmware's bigger slot (its build
+ * defines FL_APP_END, a 4 KiB boundary up to 0xE0000): its code then runs past the old end, and the plain window, the
+ * store and XDATA0 start above it (XDATA0 empty from 0x97000 on) */
+#ifndef FL_APP_END
+#define FL_APP_END 0x00093000u
 #endif
+#ifndef FM1_FLASH_PLAIN_LO
+#define FM1_FLASH_PLAIN_LO FL_APP_END
+#endif
+#define FL_PLAIN_LO FM1_FLASH_PLAIN_LO
 #ifndef FM1_FLASH_PLAIN_HI
 #define FM1_FLASH_PLAIN_HI FM1_FLASH_XIP_SIZE
 #endif
@@ -36,7 +44,7 @@
     (uint32_t)(n) <= (uint32_t)(hi) - (uint32_t)(off))
 
 /* Compatibility names; new applications supply their own regions above. */
-#define FL_DATA_LO 0x00097000u
+#define FL_DATA_LO (FL_APP_END > 0x00097000u ? FL_APP_END : 0x00097000u)
 #define FL_DATA_HI 0x000E0000u
 #define FL_GLOB_LO 0x000FC000u
 #define FL_GLOB_HI 0x000FF000u
@@ -44,7 +52,7 @@
 #define FL_OTA_HI  0x000E5000u
 #define FL_AUTO_LO 0x000E5000u
 #define FL_AUTO_HI 0x000E7000u
-#define FL_XDATA0_LO 0x00093000u
+#define FL_XDATA0_LO (FL_APP_END < 0x00097000u ? FL_APP_END : 0x00097000u)
 #define FL_XDATA0_HI 0x00097000u
 #define FL_XDATA1_LO 0x000E7000u
 #define FL_XDATA1_HI 0x000FC000u
