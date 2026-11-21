@@ -229,10 +229,13 @@ static void deliver_rx(void)            /* an IN request is pending on EP1 and t
     regs[1][20] = 1;
 }
 
+static int csr0_rx_kept;                                /* EP0 as the device's: writing 0 clears SentStall only */
 static void mock_write(uint32_t r, uint32_t v)
 {
     if (r == 14) {
         index_reg = (uint8_t)v;
+    } else if (csr0_rx_kept && index_reg == 0 && r == 17 && !v) {
+        regs[0][17] &= 1u;                              /* the device's SentStall cleared: RxPktRdy stays */
     } else if (r == 1 && (v & 8u)) {                    /* POWER: bus reset */
         bus_reset();
         common[r] = (uint8_t)v;
@@ -1481,10 +1484,27 @@ int main(void)
         midi_in_event(0x06u | 0x02u << 8 | 0xF7u << 16);
         assert(sx_seen_n == 5u && memcmp(sx_seen, SX, 5u) == 0);
     }
+    {   /* a SETUP that came while the STALL before it was still unserviced: answered in the same pass (felucca-bsp#28;
+         * the interrupt that brought the poll was its, and no other comes) */
+        static const uint8_t SET_ADDR[8] = {0x00, 0x05, 9, 0, 0, 0, 0, 0};
+        uint32_t n = usb.setups;
+        memcpy(ep0buf, SET_ADDR, 8);
+        usb.e0_tx = 0;
+        sie_wr(S_INDEX, 0);
+        csr0_rx_kept = 1;
+        regs[0][17] = 0x05;                             /* SentStall + RxPktRdy */
+        ep0_service();
+        csr0_rx_kept = 0;
+        assert(usb.setups == n + 1u && regs[0][17] == 0x48 && usb.has_pend_addr && usb.pend_addr == 9);
+        usb.has_pend_addr = 0;
+        regs[0][17] = 0x04;                             /* SentStall alone: cleared, nothing taken */
+        ep0_service();
+        assert(usb.setups == n + 1u && !regs[0][17]);
+    }
     usb_detach();
     usb_retry(5000u);
     assert(!usb.up);
-    puts("USB device-only/loader: startup, MIDI output, the SysEx byte hook and detach: OK");
+    puts("USB device-only/loader: startup, MIDI output, the SysEx byte hook, a SETUP behind a STALL and detach: OK");
     return 0;
 }
 #endif

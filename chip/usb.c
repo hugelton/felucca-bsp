@@ -1584,7 +1584,7 @@ static void ep0_service(void)
 #if FELUCCA_UAC
         uac.e0_rx = 0;
 #endif
-        return;
+        csr = sie_rd(S_CSR0);                           /* a SETUP may be here already: its interrupt was this one */
     }
     if (csr & 0x10u) {                                  /* SetupEnd: the host abandoned the transfer */
         sie_wr(S_CSR0, 0x80);
