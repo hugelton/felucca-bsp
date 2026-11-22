@@ -31,6 +31,14 @@
 #include "fm1_flash_policy.h"
 #include "fm1_flash_access.h"
 
+/* RAM code only the update loader calls (fl_status_ram, the erase while it receives): kept in the loader (FELUCCA_LOADER)
+ * as every RAMFN is (used); in an app without used, so the compiler drops it unless the app calls it (1.3 KB of RAM). A
+ * host test's own RAMFN stands for both */
+#if defined(FELUCCA_LOADER) || defined(RAMFN)
+#define RAMFN_LDR RAMFN
+#else
+#define RAMFN_LDR __attribute__((section(".ram_text"), noinline))
+#endif
 #ifndef RAMFN
 #define RAMFN  __attribute__((section(".ram_text"), noinline, used))
 #endif
@@ -209,7 +217,7 @@ static RAMFN int fl_uid_ram(uint8_t *dst)
 }
 #endif
 
-static RAMFN uint32_t fl_status_ram(void)                /* SR1 | SR2 << 8 */
+static RAMFN_LDR uint32_t fl_status_ram(void)                /* SR1 | SR2 << 8 */
 {
     fl_saved_t s; uint32_t v;
     if (fl_enter(&s)) return 0xFFFFFFFFu;
@@ -243,7 +251,7 @@ static RAMFN int fl_erase4k_ram(uint32_t off, uint32_t *took_us)
  * as fl_erase4k_ram's) and gives the XIP back. Between the two nothing may touch the flash. Begin takes the same checks
  * as fl_erase4k_ram (the write regions, the flash gate: CPU0, interrupts off, CPU1 idle); *s and *issued (the caller's
  * RAM, kept for end) get the saved SFC / SPI state and the command's time */
-static RAMFN int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s, uint32_t *issued)
+static RAMFN_LDR int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s, uint32_t *issued)
 {
     if (!FL_WRITE_OK(off, 0x1000u) || (off & 0xFFFu))
         return FL_ERR_RANGE;
@@ -258,7 +266,7 @@ static RAMFN int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s, uint32_t *iss
     fl_inval(off, 4096u);
     return 0;
 }
-static RAMFN int fl_erase4k_end_ram(const fl_saved_t *s, uint32_t issued, uint32_t *took_us)
+static RAMFN_LDR int fl_erase4k_end_ram(const fl_saved_t *s, uint32_t issued, uint32_t *took_us)
 {
     int rc = fl_wait_split(issued, 500000u, 2000000u, took_us);   /* generic NOR max 400 ms */
     fl_exit(s);
