@@ -103,3 +103,12 @@ for flags in "-DTEST_MEM=1 -DTEST_CH=4 -DTEST_TAP=1:FELUCCA_UAC_MEM lends" "-DTE
     grep -q "error: .*$msg" "$USB_TEST_DIR/err" || { echo "uac_test $flags: failed, but not with the #error '$msg':"; cat "$USB_TEST_DIR/err"; exit 1; }
     echo "uac_test $flags: #error '$msg': OK"
 done
+# The network adapter (FELUCCA_NCM, tests/ncm_test.c): beside the split audio whose output has its feedback (it gives
+# way, the output's interfaces become its), beside the console (one or the other), and beside the split audio without
+# feedback (always there)
+for flags in "-DTEST_FB=1" "-DTEST_CDC=1" "-DTEST_NONE=1"; do
+    # Word splitting is intentional for the fixed compiler options above.
+    "${CC:-cc}" -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable \
+        -Wno-missing-field-initializers -D_GNU_SOURCE $SANITIZE -Ichip $flags tests/ncm_test.c -o "$USB_TEST_DIR/ncm"
+    "$USB_TEST_DIR/ncm"
+done

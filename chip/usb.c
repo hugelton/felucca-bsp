@@ -56,6 +56,13 @@
  * FELUCCA_MSC=1 adds a disk mode: usb_msc_switch(1) drops off the bus and comes back as a USB mass-storage device
  * (bulk-only transport, EP3 bulk in and out; nothing else: no MIDI, no audio) until usb_msc_switch(0). The poll
  * only moves packets: the commands (SCSI) and the disk are the main loop's (usb_msc_read, usb_msc_send).
+ * FELUCCA_NCM=1 adds a network adapter: a CDC-NCM function (IAD, its notifications on EP2 IN, its transfer blocks on
+ * EP3 bulk in and out: usb_ncm.h), so the computer sees an Ethernet card whose frames the main loop moves
+ * (usb_ncm_rx, usb_ncm_tx_frame / usb_ncm_tx_send; the card's MAC from usb_ncm_set_mac). Its endpoints are the
+ * console's (FELUCCA_CDC) and, with FELUCCA_UAC_OUT_FEEDBACK, the audio output's feedback's, so in a build with either
+ * it takes their place while usb_ncm_on (usb_ncm_switch re-enumerates; FELUCCA_NCM_DEFAULT at boot): the console is
+ * not presented, nor the audio output function (FELUCCA_UAC_SPLIT: its interfaces become the adapter's; MIDI and the
+ * audio input stay). A build with neither presents it always. Off (the default), nothing changes.
  * FELUCCA_MIDI_RT=1 adds usb_midi_rt: MIDI clock ticks and transport sent to the host at once, from the firmware's own
  * fast tick (usb_midi_rt_kick, below). Off by default: the ring and the kick in usb_poll are not built.
  * FELUCCA_MIDI_IN_RAW, a function of the firmware's (void f(uint32_t pkt)), is given every EP1 OUT event packet as
@@ -83,6 +90,13 @@
 #ifdef FELUCCA_LOADER
 #undef FELUCCA_MSC
 #define FELUCCA_MSC 0
+#endif
+#ifndef FELUCCA_NCM
+#define FELUCCA_NCM 0
+#endif
+#ifdef FELUCCA_LOADER
+#undef FELUCCA_NCM
+#define FELUCCA_NCM 0
 #endif
 #ifndef FELUCCA_UAC
 #define FELUCCA_UAC 0
@@ -225,7 +239,7 @@ enum { S_FADDR = 0, S_POWER = 1, S_INTRTX1 = 2, S_INTRTX2 = 3, S_INTRRX1 = 4, S_
 static uint8_t ep0buf[64 + 4] __attribute__((aligned(4)));
 static uint8_t ep1tx[64] __attribute__((aligned(4)));
 static uint8_t ep1rx[64 + 4] __attribute__((aligned(4)));
-#if FELUCCA_CDC || FELUCCA_MSC
+#if FELUCCA_CDC || FELUCCA_MSC || FELUCCA_NCM
 static uint8_t ep3tx[64] __attribute__((aligned(4)));
 static uint8_t ep3rx[64 + 4] __attribute__((aligned(4)));
 #endif
@@ -257,6 +271,49 @@ static struct {
     uint8_t rx_pend;             /* EP3 OUT packet seen, not yet taken (the ring was full) */
     uint32_t rx_pkts, tx_pkts;
 } cdc = {{0x00, 0xC2, 0x01, 0x00, 0, 0, 8}};   /* 115200 8N1 */
+#endif
+#if FELUCCA_NCM
+/* the network adapter (FELUCCA_NCM): one block in from the computer at a time (the poll fills ncm_rx packet by packet,
+ * the main loop reads it whole, then the next one is taken: the host waits meanwhile, NAKed), one block out at a time
+ * (the main loop writes a frame into ncm_tx, the poll sends it in 64-byte packets) */
+#include "usb_ncm.h"
+#ifndef FELUCCA_NCM_TX_MAX
+#define FELUCCA_NCM_TX_MAX 1024u                 /* the largest frame sent to the computer (a larger one is dropped, counted) */
+#endif
+/* what gives way to the adapter while it is presented: the console (its EP2 and EP3), the audio output's function when
+ * its feedback is on (EP3 IN; an output without feedback, on EP4 alone, stays) */
+#define NCM_DROPS_OUT (FELUCCA_UAC_OUT && FELUCCA_UAC_OUT_FEEDBACK)
+#ifndef FELUCCA_NCM_DEFAULT
+#define FELUCCA_NCM_DEFAULT (!FELUCCA_CDC && !NCM_DROPS_OUT)   /* (nothing to give way: always) */
+#endif
+#define NCM_RX_MAX 2048u                         /* dwNtbOutMaxSize: the least NCM 1.0 allows */
+#define NCM_IN_MAX 2048u                         /* dwNtbInMaxSize offered: ours are never larger (ncm_tx) */
+#define NCM_TX_N (NCM_OUT_HDR + FELUCCA_NCM_TX_MAX + 1u)   /* (+1: a block a multiple of 64 gets a pad byte, no ZLP) */
+#define NCM_BPS 12000000u                        /* full speed, told the computer once the data interface is on */
+#if NCM_DROPS_OUT && !FELUCCA_UAC_SPLIT
+#error "FELUCCA_NCM with the audio output's feedback needs FELUCCA_UAC_SPLIT (the adapter takes the output function's place)"
+#endif
+static uint8_t ep2n[16] __attribute__((aligned(4)));   /* a notification going out on EP2 */
+static uint8_t ncm_rx[NCM_RX_MAX] __attribute__((aligned(4)));
+static uint8_t ncm_tx[NCM_TX_N] __attribute__((aligned(4)));
+static uint8_t usb_ncm_on = FELUCCA_NCM_DEFAULT != 0;   /* the adapter is presented (read by the TIMER5 ISR) */
+static struct {
+    volatile uint8_t alt;        /* the data interface's alt setting: 1 frames flow */
+    uint8_t e0_rx;               /* SET_NTB_INPUT_SIZE's data stage pending */
+    uint8_t rx_pend;             /* EP3 OUT packet seen, not yet taken (the last block still the main loop's) */
+    volatile uint8_t rx_full;    /* a whole block in ncm_rx, the main loop's until usb_ncm_rx_done */
+    uint8_t note;                /* notifications still to send: 2 the speed, then 1 connected */
+    uint16_t seq;                /* the blocks sent's sequence */
+    volatile uint32_t rx_n;      /* the block's bytes in ncm_rx */
+    volatile uint32_t tx_n;      /* the block in ncm_tx going out (0: free) */
+    uint32_t tx_off;             /* .. its bytes sent */
+    uint32_t in_max;             /* the host's SET_NTB_INPUT_SIZE (what it takes at most) */
+    uint8_t mac_str[2 + 24];     /* the adapter's MAC, as its string descriptor */
+    uint32_t rx_blocks, tx_blocks, tx_busy, tx_big;   /* (diagnostics) */
+} ncm = {.in_max = NCM_IN_MAX};
+#define USB_NCM_ON usb_ncm_on
+#else
+#define USB_NCM_ON 0
 #endif
 
 #if FELUCCA_UAC
@@ -1123,6 +1180,51 @@ static uint8_t usb_cdc_on = FELUCCA_CDC_DEFAULT != 0;      /* the console is pre
 #define UAC_AS_IF (AUD_IF + IF_AS)
 #define UAC_ASO_IF (AUD_IF + IF_ASO)        /* the output stream (FELUCCA_UAC_OUT) */
 #endif
+#if FELUCCA_NCM
+/* the network adapter (FELUCCA_NCM): MIDI and audio as without it (less the output's function when it gives way,
+ * NCM_DROPS_OUT: then the adapter has its interface numbers), the adapter last. The build's bcdDevice, as without it:
+ * every one of its bits already tells some build apart (BCD_LO, BCD_HI), so the computer tells the two presentations
+ * apart by their interfaces, not by bcdDevice */
+#if FELUCCA_USB_LAYOUT
+#error "FELUCCA_NCM: FELUCCA_USB_LAYOUT 0 only"
+#endif
+#define USB_STR_MAC 0x31                    /* (clear of the serial number's 0x30 and the names below it) */
+#define NCM_LEN 85
+#define D_NCM(c)                                                                                     \
+    D_IAD((c), 2, 2, 0x0D, 0),                             /* IAD: CDC NCM */                           \
+    9, 4, (c), 0, 1, 2, 0x0D, 0, 0,                        /* communication: NCM */                     \
+    5, 0x24, 0x00, 0x10, 0x01,                             /* header 1.10 */                            \
+    5, 0x24, 0x06, (c), (c) + 1,                           /* union */                                  \
+    13, 0x24, 0x0F, USB_STR_MAC, 0, 0, 0, 0, 0xEA, 0x05, 0, 0, 0,   /* Ethernet: the MAC, 1514-byte frames */  \
+    6, 0x24, 0x1A, 0x00, 0x01, 0,                          /* NCM 1.00, none of the optional requests */ \
+    7, 5, 0x82, 3, 64, 0, 16,                              /* EP2 IN interrupt: the notifications */    \
+    9, 4, (c) + 1, 0, 0, 0x0A, 0, 1, 0,                    /* data, alt 0: no endpoints (link down) */  \
+    9, 4, (c) + 1, 1, 2, 0x0A, 0, 1, 0,                    /* data, alt 1: the blocks */                \
+    7, 5, 0x03, 2, 64, 0, 0,                               /* EP3 OUT bulk */                           \
+    7, 5, 0x83, 2, 64, 0, 0                                /* EP3 IN bulk */
+#if NCM_DROPS_OUT
+#define D_AUDIO_NET(a) D_IADS((a), 0) D_AC_MIDI(a) D_MIDI((a) + 1) D_IADS((a) + 2, UA_STR_IN) D_AC_IN((a) + 2) D_AS((a) + 3)
+#define AUD_NIF_NET (AUD_NIF - 2)
+#define AUD_LEN_NET (AUD_LEN - (99 + 9 * FELUCCA_UAC_OUT_FEEDBACK + (43 + 9 * FELUCCA_UAC_OUT_FEEDBACK) * FELUCCA_UAC_OUT_24))
+#else
+#define D_AUDIO_NET(a) D_AUDIO(a)
+#define AUD_NIF_NET AUD_NIF
+#define AUD_LEN_NET AUD_LEN
+#endif
+#define NCM_IF AUD_NIF_NET                  /* the adapter's communication interface; its data interface the next */
+#if FELUCCA_UAC_IAD || !FELUCCA_UAC_SPLIT               /* (an IAD over audio + MIDI on the misc / IAD device, as the console's
+                                                         * layout has: Windows groups the functions by them) */
+#define CFG_LEN_NCM (9 + 8 + AUD_LEN_NET + NCM_LEN)
+static const uint8_t CFG_DESC_NCM[] = {D_CFG(CFG_LEN_NCM, AUD_NIF_NET + 2), D_IAD(0, AUD_FN_NIF, 1, 1, 0), D_AUDIO_NET(0)
+                                       D_NCM(NCM_IF)};
+#else
+#define CFG_LEN_NCM (9 + AUD_LEN_NET + NCM_LEN)
+static const uint8_t CFG_DESC_NCM[] = {D_CFG(CFG_LEN_NCM, AUD_NIF_NET + 2), D_AUDIO_NET(0) D_NCM(NCM_IF)};
+#endif
+typedef char cfg_ncm_len_ok[sizeof CFG_DESC_NCM == CFG_LEN_NCM ? 1 : -1];
+static const uint8_t DEV_DESC_NCM[18] = {18, 1, 0x00, 0x02, 0xEF, 0x02, 0x01, 64, 0x09, 0x12, FELUCCA_USB_PID & 0xFF,
+                                         FELUCCA_USB_PID >> 8, BCD_LO(0), BCD_HI, 1, 2, USB_STR_SERIAL, 1};
+#endif
 #if FELUCCA_MSC
 /* disk mode: one interface, mass storage (SCSI transparent, bulk-only), EP3 OUT and IN bulk; its own bcdDevice (a
  * changed device to the computer) and a serial number (the bulk-only transport asks for one) */
@@ -1235,15 +1337,37 @@ static int get_desc(uint32_t wvalue, const uint8_t **d, uint16_t *l)
 #endif
     switch (wvalue >> 8) {
     case 1:
+#if FELUCCA_NCM
+        if (usb_ncm_on) {
+            *d = DEV_DESC_NCM;
+            *l = 18;
+            return 1;
+        }
+#endif
         *d = USB_CDC_ON ? DEV_DESC : DEV_DESC_PLAIN;
         *l = 18;
         return 1;
     case 2:
+#if FELUCCA_NCM
+        if (usb_ncm_on) {
+            *d = CFG_DESC_NCM;
+            *l = (uint16_t)sizeof CFG_DESC_NCM;
+            return 1;
+        }
+#endif
         *d = USB_CDC_ON ? CFG_DESC : CFG_DESC_PLAIN;
         *l = (uint16_t)(USB_CDC_ON ? sizeof CFG_DESC : sizeof CFG_DESC_PLAIN);
         return 1;
     case 3:
         switch (wvalue & 0xFFu) {
+#if FELUCCA_NCM
+        case USB_STR_MAC:
+            if (!usb_ncm_on || !ncm.mac_str[0])
+                return 0;
+            *d = ncm.mac_str;
+            *l = ncm.mac_str[0];
+            return 1;
+#endif
         case 0:
             *d = STR0;
             *l = sizeof STR0;
@@ -1473,6 +1597,59 @@ static void msc_config(void)                            /* disk mode's SET_CONFI
 }
 #endif
 
+#if FELUCCA_NCM
+/* a configuration, the link down (alt 0), a bus reset: nothing in flight. A whole block the main loop holds (rx_full)
+ * stays its own until usb_ncm_rx_done: the main loop may be reading it right now, so it is neither cleared nor written
+ * over (its frames are old, not torn); only a block still coming in is dropped */
+static void ncm_reset(void)
+{
+    ncm.alt = 0;
+    ncm.e0_rx = 0;
+    ncm.rx_pend = 0;
+    ncm.note = 0;
+    if (!ncm.rx_full)
+        ncm.rx_n = 0;
+    ncm.tx_off = 0;
+    ncm.in_max = NCM_IN_MAX;                            /* (NCM 1.0: the host's input size holds until alt 0 again) */
+    ncm.seq = 0;
+    RING_PUBLISH();
+    ncm.tx_n = 0;                                       /* (a block the main loop handed over is dropped) */
+}
+static void ncm_config(void)                            /* SET_CONFIGURATION 1: EP2 IN (notifications), EP3 bulk both ways */
+{
+    ncm_reset();
+    fm1_usb_ep_txbuf(2, ep2n);
+    sie_wr(S_INDEX, 2);
+    sie_wr(S_TXMAXP, 0xFF);
+    sie_wr(S_TXCSR1, 0x48);
+    sie_wr(S_TXCSR2, 0);
+    fm1_usb_ep_txbuf(3, ep3tx);
+    fm1_usb_ep_rxbuf(3, ep3rx);
+    sie_wr(S_INDEX, 3);
+    sie_wr(S_TXMAXP, 0xFF);
+    sie_wr(S_TXCSR1, 0x48);
+    sie_wr(S_TXCSR2, 0);
+    sie_wr(S_RXMAXP, 0xFF);
+    sie_wr(S_RXCSR1, 0x90);
+    sie_wr(S_RXCSR2, 0);
+    sie_wr(S_INTRRX1E, 0x0A);
+    fm1_usb_ep_enable((1u << 2) | (1u << 3));
+}
+static void ncm_alt(uint32_t alt)                       /* SET_INTERFACE on the data interface: 1 the link up, 0 down */
+{
+    uint32_t in_max = ncm.in_max;
+    ncm_reset();
+    if (alt)
+        ncm.in_max = in_max;                            /* (set in alt 0 for the link that alt 1 brings up) */
+    sie_wr(S_INDEX, 3);                                 /* (a new alt setting: its endpoints' toggles start again) */
+    sie_wr(S_TXCSR1, 0x48);                             /* ClrDataTog + FlushFIFO */
+    sie_wr(S_RXCSR1, 0x90);
+    ncm.alt = (uint8_t)alt;
+    ncm.note = alt ? 2u : 0u;                           /* the speed, then connected */
+    ncm.rx_pend = (uint8_t)(alt != 0);
+}
+#endif
+
 static void ep1_config(void)
 {
     fm1_usb_ep_txbuf(1, ep1tx);
@@ -1521,14 +1698,20 @@ no_cdc:;
     uo_stream(0);
 #endif
 #if FELUCCA_UAC_OUT_FEEDBACK
-    fm1_usb_ep_txbuf(3, uo_fb);                         /* EP3 IN: the output's feedback */
-    sie_wr(S_INDEX, 3);
-    sie_wr(S_TXMAXP, 0xFF);
-    uo_fb_reset();
-    fm1_usb_ep_enable(1u << 3);
+    if (!USB_NCM_ON) {                                  /* (the adapter has EP3 instead: the output is not presented) */
+        fm1_usb_ep_txbuf(3, uo_fb);                     /* EP3 IN: the output's feedback */
+        sie_wr(S_INDEX, 3);
+        sie_wr(S_TXMAXP, 0xFF);
+        uo_fb_reset();
+        fm1_usb_ep_enable(1u << 3);
+    }
 #endif
     fm1_usb_ep_enable(1u << 4);
     uac_stream(0);
+#endif
+#if FELUCCA_NCM
+    if (usb_ncm_on)
+        ncm_config();
 #endif
 }
 
@@ -1581,6 +1764,9 @@ static void ep0_service(void)
 #if FELUCCA_CDC
         cdc.e0_rx = 0;
 #endif
+#if FELUCCA_NCM
+        ncm.e0_rx = 0;
+#endif
 #if FELUCCA_UAC
         uac.e0_rx = 0;
 #endif
@@ -1591,6 +1777,9 @@ static void ep0_service(void)
         usb.e0_tx = 0;
 #if FELUCCA_CDC
         cdc.e0_rx = 0;                                  /* else the next SETUP is taken as line coding */
+#endif
+#if FELUCCA_NCM
+        ncm.e0_rx = 0;
 #endif
 #if FELUCCA_UAC
         uac.e0_rx = 0;
@@ -1610,6 +1799,14 @@ static void ep0_service(void)
         for (i = 0; i < 7u && i < n; i++)
             cdc.line[i] = ep0buf[i];
         cdc.e0_rx = 0;
+        goto ack;
+    }
+#endif
+#if FELUCCA_NCM
+    if (ncm.e0_rx) {                                    /* SET_NTB_INPUT_SIZE: 4 bytes, what the host takes at most */
+        if (sie_rd(S_COUNT0) >= 4u)
+            ncm.in_max = ncm_rd16(ep0buf) | ncm_rd16(ep0buf + 2) << 16;
+        ncm.e0_rx = 0;
         goto ack;
     }
 #endif
@@ -1661,6 +1858,10 @@ static void ep0_service(void)
             midi_links++;
         } else
             sie_wr(S_INTRRX1E, 0);
+#if FELUCCA_NCM
+        if (usb.config != 1u)
+            ncm_reset();
+#endif
 #if FELUCCA_UAC
         if (usb.config != 1u)
             uac_stream(0);
@@ -1680,6 +1881,14 @@ static void ep0_service(void)
         e0_send(zero2, 2, wlength);
         return;
     case 0x010B:                                        /* SET_INTERFACE: alt 0 (alt 1 for the audio stream) */
+#if FELUCCA_NCM
+        if (usb_ncm_on && s[4] == NCM_IF + 1u && usb.config) {   /* (first: it may have the output's number) */
+            if (wvalue > 1u)
+                goto stall;
+            ncm_alt(wvalue);
+            goto ack;
+        }
+#endif
 #if FELUCCA_UAC
         if (s[4] == UAC_AS_IF && wvalue <= UA_ALTS && usb.config) {
             uac_ep4_reset();
@@ -1701,6 +1910,14 @@ static void ep0_service(void)
             goto ack;
         goto stall;
     case 0x810A:
+#if FELUCCA_NCM
+        if (usb_ncm_on && s[4] == NCM_IF + 1u) {
+            static uint8_t alt_n;
+            alt_n = ncm.alt;
+            e0_send(&alt_n, 1, wlength);
+            return;
+        }
+#endif
 #if FELUCCA_UAC
         if (s[4] == UAC_AS_IF) {
             static uint8_t alt;
@@ -1720,10 +1937,10 @@ static void ep0_service(void)
         e0_send(zero2, 1, wlength);
         return;
     case 0x0201: {                                      /* CLEAR_FEATURE(ENDPOINT_HALT): data toggle reset */
-        uint32_t ep = s[4] & 0x0Fu, last = (USB_CDC_ON || USB_MSC_ON) ? 3u : 1u;
+        uint32_t ep = s[4] & 0x0Fu, last = (USB_CDC_ON || USB_MSC_ON || USB_NCM_ON) ? 3u : 1u;
 #if FELUCCA_UAC
         if (wvalue == 0 && (s[4] == 0x84u || (FELUCCA_UAC_OUT && s[4] == 0x04u) ||
-                            (FELUCCA_UAC_OUT_FEEDBACK && s[4] == 0x83u)))
+                            (FELUCCA_UAC_OUT_FEEDBACK && !USB_NCM_ON && s[4] == 0x83u)))
             goto ack;                                   /* isochronous: no halt, no toggle */
 #endif
         if (wvalue != 0 || ep > last)
@@ -1749,6 +1966,41 @@ static void ep0_service(void)
         msi_r = msi_w;
         msc_tx_n = 0;
         msc_resets++;
+        goto ack;
+#endif
+#if FELUCCA_NCM
+    case 0xA180: {                                      /* GET_NTB_PARAMETERS: 16-bit blocks, 2048 bytes each way,
+                                                         * datagrams on 4-byte boundaries, one datagram a block out */
+        static const uint8_t NTB_PARAMS[28] = {28, 0, 0x01, 0, NCM_IN_MAX & 0xFF, NCM_IN_MAX >> 8, 0, 0, 4, 0, 0, 0,
+                                               4, 0, 0, 0, NCM_RX_MAX & 0xFF, NCM_RX_MAX >> 8, 0, 0, 4, 0, 0, 0,
+                                               4, 0, 1, 0};
+        if (!usb_ncm_on || s[4] != NCM_IF)
+            goto stall;
+        e0_send(NTB_PARAMS, sizeof NTB_PARAMS, wlength);
+        return;
+    }
+    case 0xA185: {                                      /* GET_NTB_INPUT_SIZE */
+        static uint8_t in_size[4];
+        if (!usb_ncm_on || s[4] != NCM_IF)
+            goto stall;
+        ncm_wr16(in_size, ncm.in_max & 0xFFFFu);
+        ncm_wr16(in_size + 2, ncm.in_max >> 16);
+        e0_send(in_size, 4, wlength);
+        return;
+    }
+    case 0x2186:                                        /* SET_NTB_INPUT_SIZE: 4 bytes follow */
+        if (!usb_ncm_on || s[4] != NCM_IF)
+            goto stall;
+        if (wlength) {
+            ncm.e0_rx = 1;
+            sie_wr(S_INDEX, 0);
+            sie_wr(S_CSR0, 0x40);                       /* ServicedRxPktRdy, no DataEnd yet */
+            return;
+        }
+        goto ack;
+    case 0x2143:                                        /* SET_ETHERNET_PACKET_FILTER: taken (every frame is read anyway) */
+        if (!usb_ncm_on || s[4] != NCM_IF)
+            goto stall;
         goto ack;
 #endif
 #if FELUCCA_CDC
@@ -2310,6 +2562,100 @@ static void ep3_tx(void)                                /* <= 63 bytes per packe
     fm1_usb_ep_send(3, ep3tx, n);
     sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
     cdc.tx_pkts++;
+}
+#endif
+
+#if FELUCCA_NCM
+/* EP3 OUT: a block's packets into ncm_rx; a short packet ends the transfer (and one that fills ncm_rx: a host pads a
+ * block to dwNtbOutMaxSize instead of a zero-length packet), and the block is the main loop's until usb_ncm_rx_done.
+ * Meanwhile the next packet waits in the FIFO (NAK) */
+static void ncm_ep3_rx(void)
+{
+    uint32_t csr, n, i;
+    sie_wr(S_INDEX, 3);
+    csr = sie_rd(S_RXCSR1) | (sie_rd(S_RXCSR2) << 8);
+    if (!(csr & 1u)) {
+        ncm.rx_pend = 0;
+        return;
+    }
+    if (ncm.rx_full)
+        return;                                         /* rx_pend stays: retried next poll */
+    ncm.rx_pend = 0;
+    n = sie_rd(S_RXCOUNT1) | (sie_rd(S_RXCOUNT2) << 8);
+    if (n > 64u)
+        n = 64u;
+    fm1_usb_rx_sync();
+    for (i = 0; i < n; i++)                             /* (rx_n is a multiple of 64 below NCM_RX_MAX here: it fits) */
+        ncm_rx[ncm.rx_n + i] = ep3rx[i];
+    ncm.rx_n += n;
+    csr = (csr & ~0x164u) | 0x10u;
+    sie_wr(S_RXCSR1, csr & 0xFFu);
+    sie_wr(S_RXCSR2, csr >> 8);
+    if (n == 64u && ncm.rx_n < NCM_RX_MAX)
+        return;                                         /* more of this block to come */
+    if (!ncm.rx_n)
+        return;                                         /* a lone zero-length packet */
+    RING_PUBLISH();
+    ncm.rx_full = 1;
+    ncm.rx_blocks++;
+}
+
+/* EP3 IN: the block in ncm_tx, 64 bytes a packet (never a multiple of 64 long: usb_ncm_tx_send pads, so no ZLP) */
+static void ncm_ep3_tx(void)
+{
+    uint32_t csr, n, i, off = ncm.tx_off, total = ncm.tx_n;
+    if (!total)
+        return;
+    sie_wr(S_INDEX, 3);
+    csr = sie_rd(S_TXCSR1);
+    if (csr & 0x01u)
+        return;                                         /* the last packet not taken yet */
+    if (csr & 0x80u)
+        sie_wr(S_TXCSR1, csr & ~0x80u);
+    if (off >= total) {                                 /* all taken: the buffer is free again */
+        ncm.tx_off = 0;
+        ncm.tx_blocks++;
+        RING_PUBLISH();
+        ncm.tx_n = 0;
+        return;
+    }
+    n = total - off > 64u ? 64u : total - off;
+    for (i = 0; i < n; i++)
+        ep3tx[i] = ncm_tx[off + i];
+    fm1_usb_ep_send(3, ep3tx, n);
+    sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
+    ncm.tx_off = off + n;
+}
+
+/* EP2 IN: once the data interface is on, CONNECTION_SPEED_CHANGE (12 Mb/s each way), then NETWORK_CONNECTION up */
+static void ncm_ep2_note(void)
+{
+    uint32_t n, i;
+    if (!ncm.note)
+        return;
+    sie_wr(S_INDEX, 2);
+    if (sie_rd(S_TXCSR1) & 0x01u)
+        return;
+    for (i = 0; i < sizeof ep2n; i++)
+        ep2n[i] = 0;
+    ep2n[0] = 0xA1;
+    ep2n[4] = NCM_IF;
+    if (ncm.note == 2u) {
+        ep2n[1] = 0x2A;                                 /* CONNECTION_SPEED_CHANGE, 8 bytes of rates */
+        ep2n[6] = 8;
+        for (i = 0; i < 2u; i++) {
+            ncm_wr16(ep2n + 8 + 4 * i, NCM_BPS & 0xFFFFu);
+            ncm_wr16(ep2n + 10 + 4 * i, NCM_BPS >> 16);
+        }
+        n = 16;
+    } else {
+        ep2n[1] = 0x00;                                 /* NETWORK_CONNECTION: connected */
+        ep2n[2] = 1;
+        n = 8;
+    }
+    fm1_usb_ep_send(2, ep2n, n);
+    sie_wr(S_TXCSR1, sie_rd(S_TXCSR1) | 0x01u);
+    ncm.note--;
 }
 #endif
 
@@ -3734,6 +4080,9 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
         cdc.e0_rx = 0;
         cdc.rx_pend = 0;
 #endif
+#if FELUCCA_NCM
+        ncm_reset();
+#endif
 #if FELUCCA_MSC
         msi_r = msi_w;
         msc_tx_n = 0;
@@ -3787,6 +4136,16 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
             ep3_rx();
         if (cdc.dtr)
             ep3_tx();
+    }
+#endif
+#if FELUCCA_NCM
+    if (usb.config && usb_ncm_on && ncm.alt) {
+        if (ir & 0x08u)
+            ncm.rx_pend = 1;
+        if (ncm.rx_pend)                                /* not every poll: 3 SIE round trips each */
+            ncm_ep3_rx();
+        ncm_ep3_tx();
+        ncm_ep2_note();
     }
 #endif
 #if FELUCCA_UAC
@@ -3857,6 +4216,100 @@ static __attribute__((unused)) void usb_cdc_switch(uint32_t on)
     usb.config = 0;
     cdc.dtr = 0;                                        /* the console stops writing */
     cdc.rx_pend = 0;
+#if FELUCCA_NCM
+    if (on) {
+        ncm_reset();
+        usb_ncm_on = 0;                                 /* (they share EP2 and EP3: the console's now) */
+    }
+#endif
     usb_cdc_on = (uint8_t)on;
+}
+#endif
+
+#if FELUCCA_NCM
+/* the main loop's side of the network adapter (FELUCCA_NCM) */
+/* Present the adapter or not (main loop; at boot before usb_start, or later from a setting), as usb_cdc_switch: a
+ * change while attached drops off the bus and usb_retry attaches again within a second with the other descriptors.
+ * On, it takes the place of what gives way to it (the console, the audio output's function: NCM_DROPS_OUT) */
+static __attribute__((unused)) void usb_ncm_switch(uint32_t on)
+{
+    on = on != 0;
+    if (on == usb_ncm_on)
+        return;
+    if (usb.up) {
+        usb.up = 0;                                     /* usb_poll (TIMER5) stops before the SIE goes */
+        RING_PUBLISH();
+        fm1_usb_off();
+    }
+    usb.config = 0;
+    ncm_reset();
+#if FELUCCA_CDC
+    {
+        static uint8_t cdc_was;                         /* the console as it was before the adapter took its place */
+        if (on) {
+            cdc_was = usb_cdc_on;
+            cdc.dtr = 0;
+            cdc.rx_pend = 0;
+            usb_cdc_on = 0;
+        } else
+            usb_cdc_on = cdc_was;                       /* (the adapter gone: the console back as it was) */
+    }
+#endif
+    usb_ncm_on = (uint8_t)on;
+}
+static __attribute__((unused)) int usb_ncm_presented(void) { return usb_ncm_on; }
+/* the adapter's MAC (the computer's side of the cable takes it), before a computer reads it: at boot */
+static void usb_ncm_set_mac(const uint8_t mac[6])
+{
+    static const char hex[] = "0123456789ABCDEF";
+    uint32_t i;
+    for (i = 0; i < 12u; i++) {
+        ncm.mac_str[2 + 2 * i] = (uint8_t)hex[(mac[i / 2u] >> ((i & 1u) ? 0 : 4)) & 0xFu];
+        ncm.mac_str[3 + 2 * i] = 0;
+    }
+    ncm.mac_str[1] = 3;
+    ncm.mac_str[0] = 2 + 24;
+}
+/* the link is up: the computer configured the device and turned the data interface on */
+static int usb_ncm_ready(void) { return usb_ncm_on && usb.up && usb.config == 1u && ncm.alt; }
+/* the block the computer sent, whole (its length; 0: none waiting). The next is taken only after usb_ncm_rx_done */
+static uint32_t usb_ncm_rx(const uint8_t **p)
+{
+    if (!ncm.rx_full)
+        return 0;
+    RING_PUBLISH();
+    *p = ncm_rx;
+    return ncm.rx_n;
+}
+static void usb_ncm_rx_done(void)
+{
+    ncm.rx_n = 0;
+    RING_PUBLISH();
+    ncm.rx_full = 0;
+}
+/* where the next frame to the computer is written (FELUCCA_NCM_TX_MAX bytes at most), 0 while the last block is still
+ * going out or the link is down; then usb_ncm_tx_send(its length) */
+static uint8_t *usb_ncm_tx_frame(void) { return usb_ncm_ready() && !ncm.tx_n ? ncm_tx + NCM_OUT_HDR : 0; }
+static int usb_ncm_tx_send(uint32_t len)                /* 1: on its way; 0: dropped (busy, too large), counted */
+{
+    uint32_t total;
+    if (!usb_ncm_ready() || ncm.tx_n) {
+        ncm.tx_busy++;
+        return 0;
+    }
+    total = len <= FELUCCA_NCM_TX_MAX ? ncm_ntb_one(ncm_tx, sizeof ncm_tx - 1u, ncm.seq, ncm_tx + NCM_OUT_HDR, len) : 0;
+    if (!total || total + 1u > ncm.in_max) {
+        ncm.tx_big++;
+        return 0;
+    }
+    ncm.seq++;
+    if (!(total & 63u)) {                               /* a pad byte: the transfer ends on a short packet, no ZLP */
+        ncm_tx[total++] = 0;
+        ncm_wr16(ncm_tx + 8, total);
+    }
+    ncm.tx_off = 0;
+    RING_PUBLISH();
+    ncm.tx_n = total;
+    return 1;
 }
 #endif
