@@ -33,8 +33,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "fm1_flash_policy.h"                            /* FL_IN, FL_DATA_LO */
-#include "../loader/ldr_range.h"                         /* the loader's own driver guard (loader.c's FL_RANGE_OK) */
 
 #define FELUCCA_OTA_DRYRUN 0
 #define LDR_FAST_CHUNK 4096u
@@ -51,8 +49,13 @@ _Static_assert(LDR_SMK37_WINDOWS_OK, "the SMK's loader windows");
 #define STG_LO FL_OTA_LO                                 /* ota.c OTA_AREA: 0xBB000 */
 #define STG_HI FL_OTA_HI
 #define GLOB_LO FL_PROT1_LO                              /* BTIF (0xC0000) and everything above it: never written */
+/* the loader's own driver guard (ldr_smk37.h's FL_RANGE_OK: the board's window; no resource region there) */
+#define DRIVER_OK(off, n, win_lo, win_hi) ((void)(win_lo), (void)(win_hi), FL_LOADER_RANGE_OK(off, n))
 #define GLOB_WHAT "BTIF / USRTRIM / STORE / USR / KEY_MAC"
 #else
+#include "fm1_flash_policy.h"                            /* FL_IN, FL_DATA_LO */
+#include "../loader/ldr_range.h"                         /* the loader's own driver guard (loader.c's FL_RANGE_OK) */
+#define DRIVER_OK(off, n, win_lo, win_hi) LDR_RANGE_OK(off, n, win_lo, win_hi)
 #define FELUCCA_ID "ota-FM-1_900"
 #define BOARD "FM-1"
 #define STG_LO 0xE0000u                                  /* ota.c OTA_AREA */
@@ -187,7 +190,7 @@ static int flash_op(int kind, uint32_t off, const uint8_t *p, uint32_t n)
 {
     uint32_t i;
     tb_op(kind, off, p, n);
-    if (off < NOR_SIZE && !LDR_RANGE_OK(off, n, w_lo, w_hi))
+    if (off < NOR_SIZE && !DRIVER_OK(off, n, w_lo, w_hi))
         return -1;                                       /* (the driver refuses: tb_op counted it as a violation if it is one) */
     if (op_index == fail_at) {
         op_index++;
@@ -735,6 +738,16 @@ static void put_save(uint32_t at)
 /* the resource region (a package's res.bin entry): written after the app, kept, left alone, never in the open */
 static void res_cases(int fast)
 {
+#if LDR_NO_RES
+    pkg_t s = pkg_default();                             /* (a board's loader without one: the app, the region left alone) */
+    char sn[96];
+    s.res_len = RES_LEN;
+    s.res_base = RES_BASE;
+    res_want = RES_KEPT;
+    snprintf(sn, sizeof sn, "%s: res: none on this board, left alone", fast ? "fast" : "classic");
+    install(sn, &s, APP_HI - 0x4000u - 0x100u, APP_HI, fast, 0, 0);
+    return;
+#endif
     const char *m = fast ? "fast" : "classic";
     const uint32_t same_len = APP_HI - 0x4000u - 0x100u;
     static const uint32_t bad_base[] = {0x90000u, 0x96000u, 0xD9000u, 0xE0000u, 0x97800u, 0xFFFFF000u};

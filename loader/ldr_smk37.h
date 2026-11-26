@@ -12,9 +12,9 @@
 #pragma once
 #define FELUCCA_ID "ota-" LDR_MODEL "_900"           /* "ota-SMK-37 Pro_900", "ota-SMK-37 Elite_900", "ota-MKE-P37_900" */
 #define FM1_INPUT_TRIM 0                            /* (no factory curves needed: the buttons only) */
-#define FL_RANGE_OK(off, n) (FL_LOADER_RANGE_OK(off, n) || \
-    (ldr_res_hi && FL_IN(off, n, ldr_res_lo, ldr_res_hi)))   /* the board map's: the app area, the records up to BTIF;
-                                                  * and the window ldr_core.c opens (a resource region in the store) */
+#define FL_RANGE_OK(off, n) FL_LOADER_RANGE_OK(off, n)   /* the board map's: the app area, the records up to BTIF */
+#define LDR_NO_RES 1                                /* no resource region (3b): the store is above BTIF, never the
+                                                     * loader's; fm1-base's build refuses resources on the SMK */
 #define OTA_AREA FL_OTA_LO
 #define LDR_APP_HI FL_APP_HI
 #define LDR_REC_LO FL_REC_LO

@@ -70,6 +70,9 @@
 #ifndef LDR_DATA_HI
 #define LDR_DATA_HI 0xE0000u                    /* bytes (user samples) the host writes */
 #endif
+#ifndef LDR_NO_RES
+#define LDR_NO_RES 0                            /* 1: a board's loader writes no resource region (3b: left alone) */
+#endif
 #ifndef LDR_LAYOUT
 #define LDR_LAYOUT 0                            /* 1: the package must be laid out for this board (flash.bin's size,
                                                  * the app slot, the VM descriptor: -15, -16, -17), before any erase */
@@ -395,7 +398,7 @@ static void ldr_res(uint32_t off, uint32_t size, uint32_t base, uint32_t chunk, 
                     uint32_t done, uint32_t total)
 {
     uint32_t s, k, len, crc, have;
-    if (!off || !size || (size & 0xFFFu) || (base & 0xFFFu) || base < LDR_DATA_LO || base >= LDR_DATA_HI ||
+    if (LDR_NO_RES || !off || !size || (size & 0xFFFu) || (base & 0xFFFu) || base < LDR_DATA_LO || base >= LDR_DATA_HI ||
         size > LDR_DATA_HI - base || ldr_pkg(off, sec, 512u, 512u) || !ldr_record(sec, LDR_RES_MAGIC) ||
         (len = ota_rd32(sec + 4)) > size - 32u)
         return;
