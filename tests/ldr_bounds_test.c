@@ -18,6 +18,8 @@
  *   the loader's own, the window included, so the loader must succeed with exactly that;
  *   before the finish, also the sectors of the resource region (a package's res.bin entry) while ldr_core.c holds them
  *   open (ldr_res_window), and only those: the window must be the package's region, whole sectors of the data area;
+ *   likewise an extra region's (type 102 entries) while ldr_core.c holds it open: whole sectors of [APP_HI, 0x97000)
+ *   or [0xE5000, 0xFC000);
  *   in the finish (after ldr_record_clear): erase 0xE4000; program zeros (<= 80 B) over an update record that was
  *   there at a 4 KiB boundary - 256 in (FL_APP_END, 0xFC000] outside Felucca's store; or erase that record's sector.
  * After every session that did not finish, and at every power cut: the boot area, the staged loader, the record and
@@ -57,6 +59,9 @@ static void tb_op(int kind, uint32_t off, const uint8_t *p, uint32_t n);
 enum { H_OK, H_SILENT_AFTER, H_WRONG_ADDR, H_WRONG_LEN, H_GARBAGE, H_FLIP_LATER, H_TBL_LEN, H_NO_SUCCESS };
 static uint8_t h_hdr[0x400], h_fl[NOR_SIZE + 0x1000], h_tbl[256 * 6], h_res[NOR_SIZE];
 static uint32_t h_fl_off, h_fl_size, h_tbl_n, h_mode, h_arg, h_reads, h_flip_reads, h_res_off, h_res_size, h_res_base;
+#define XN 2
+static uint8_t h_x[XN][0x20000];                         /* the extra regions (type 102), as the package has them */
+static uint32_t h_xn, h_x_off[XN], h_x_size[XN], h_x_base[XN];
 static uint8_t rx[4800];
 static uint32_t rx_len, rx_full, now_ms;
 
@@ -101,6 +106,10 @@ static void host_data(uint32_t addr, uint8_t *d, uint32_t len)
             d[i] = h_fl[f];
         else if (h_res_size && a - h_res_off < h_res_size)
             d[i] = h_res[a - h_res_off];
+        else if (h_xn > 0 && a - h_x_off[0] < h_x_size[0])
+            d[i] = h_x[0][a - h_x_off[0]];
+        else if (h_xn > 1 && a - h_x_off[1] < h_x_size[1])
+            d[i] = h_x[1][a - h_x_off[1]];
         else
             d[i] = 0;                                    /* past the package: zeros */
     }
@@ -218,13 +227,25 @@ static void viol(const char *why, int kind, uint32_t off, uint32_t n);
 #endif
 #define APP_HI LDR_APP_HI
 
+static int x_window(uint32_t lo, uint32_t hi)            /* an extra region's, in its windows */
+{
+    uint32_t k;
+    for (k = 0; k < h_xn; k++)
+        if (lo == h_x_base[k] && hi - lo == h_x_size[k] &&
+            ((lo >= LDR_APP_HI && hi <= LDR_DATA_LO) || (lo >= 0xE5000u && hi <= 0xFC000u)))
+            return 1;
+    return 0;
+}
+
 static void ldr_res_window(uint32_t lo, uint32_t hi)
 {
     if (hi && (lo | hi) & 0xFFFu)
         viol("a window not on whole sectors", OP_ERASE, lo, hi - lo);
-    else if (hi && !(SWITCH && lo >= LDR_APP_HI && hi <= LDR_DATA_HI) &&   /* (a slot switch's erases: above the app area) */
+    else if (hi && !x_window(lo, hi) &&
+             !(SWITCH && lo >= LDR_APP_HI && hi <= LDR_DATA_HI) &&   /* (a slot switch's erases: above the app area) */
              (lo != h_res_base || hi - lo != h_res_size || lo < 0x97000u || hi > 0xE0000u))
-        viol("a window that is neither the package's region in the data area nor the slot switch's", OP_ERASE, lo, hi - lo);
+        viol("a window that is neither the package's region in the data area, an extra one nor the slot switch's",
+             OP_ERASE, lo, hi - lo);
     w_lo = lo;
     w_hi = hi;
 }
@@ -345,6 +366,8 @@ typedef struct {
     int head_zero, above_zero, flip_fl, flip_t16, flip_t32, bad_ufw, nent;
     uint32_t res_len, res_base, res_seed;                /* a res.bin entry: its payload's length, where it goes */
     int res_flip, res_bad;                               /* its payload damaged on the way; its record's CRC wrong */
+    uint32_t x_n, x_base[XN], x_len[XN], x_seed;         /* extra regions (type 102): where, how long */
+    int x_flip, x_rec;                                   /* the first one damaged on the way; a record lookalike in it */
 } pkg_t;
 #define RES_BASE (LDR_DATA_LO > 0xAB000u ? LDR_DATA_LO : 0xAB000u)   /* Polly's, or the data area's start past a bigger app */
 #define RES_LEN 0xA9E0u                                  /* 11 sectors with its record */
@@ -388,10 +411,41 @@ static int res_whole(void)                               /* the region on the fl
     return !memcmp(nor + h_res_base, h_res, h_res_size);
 }
 
+/* the extra regions as fm1-base's build writes them: raw bytes, a header of the app's in the first sector (here only
+ * bytes), padded to whole sectors with 0xFF; the CRC16 in the entry taken before x_flip damages one on the way */
+static uint16_t h_x_crc[XN];
+static void x_build(const pkg_t *p)
+{
+    uint32_t k, i;
+    h_xn = p->x_n;
+    for (k = 0; k < XN; k++) {
+        h_x_size[k] = k < h_xn ? (p->x_len[k] + 0xFFFu) & ~0xFFFu : 0;
+        h_x_base[k] = k < h_xn ? p->x_base[k] : 0;
+        memset(h_x[k], 0xFF, sizeof h_x[k]);
+        rng = 40 + p->x_seed + k;
+        for (i = 0; k < h_xn && i < p->x_len[k] && i < sizeof h_x[k]; i++)
+            h_x[k][i] = (uint8_t)rnd();
+        if (k == 0 && p->x_rec && h_x_size[k] >= 0x3000u)
+            put_record(h_x[k] + 0x2F00u);                /* its third sector reads as an update record */
+        h_x_crc[k] = (uint16_t)ota_crc16(h_x[k], h_x_size[k] < sizeof h_x[k] ? h_x_size[k] : sizeof h_x[k], 0);
+    }
+    if (p->x_flip && h_xn)
+        h_x[0][h_x_size[0] - 0x10u] ^= 0x04;             /* its last sector, after its CRC16 */
+}
+static int x_whole(uint32_t k) { return !memcmp(nor + h_x_base[k], h_x[k], h_x_size[k]); }
+static int x_as_was(uint32_t k)                          /* untouched but for the finish's kill of REC_XDATA0 */
+{
+    uint32_t a;
+    for (a = h_x_base[k]; a < h_x_base[k] + h_x_size[k]; a++)
+        if (nor[a] != before[a] && !(a - REC_XDATA0 < 80u && nor[a] == 0))
+            return 0;
+    return 1;
+}
+
 static void pkg_build(const pkg_t *p)
 {
-    uint8_t ent[3][0x50];
-    uint32_t i, k, fl_crc, sz = p->fl_size < NOR_SIZE ? p->fl_size : NOR_SIZE, ne = p->res_len ? 3u : 2u;
+    uint8_t ent[3 + XN][0x50];
+    uint32_t i, k, fl_crc, sz = p->fl_size < NOR_SIZE ? p->fl_size : NOR_SIZE, ne = p->res_len ? 3u : 2u, end;
     memset(h_fl, 0, sizeof h_fl);
     memcpy(h_fl, before, sz < 0x4000u ? sz : 0x4000u);  /* flash.bin's head: the device's ... */
     if (p->head_zero) memset(h_fl, 0, 0x4000);           /* ... or a hostile one */
@@ -429,11 +483,24 @@ static void pkg_build(const pkg_t *p)
         ota_wr32(ent[2] + LDR_RES_AT, p->res_base);
         memcpy(ent[2] + 0x40, "res.bin", 7);
     }
+    end = ne == 3u ? h_res_off + h_res_size : 0x400 + sz;
+    x_build(p);
+    for (k = 0; k < h_xn; k++) {                         /* extra regions (fm1pkg_make.py: type 102, where at 0x14) */
+        h_x_off[k] = (end + 0xFFu) & ~0xFFu;
+        ota_wr16(ent[ne], LDR_XRES_TYPE);
+        ota_wr16(ent[ne] + 4, h_x_crc[k]);
+        ota_wr32(ent[ne] + 8, h_x_off[k]);
+        ota_wr32(ent[ne] + 12, h_x_size[k]);
+        ota_wr32(ent[ne] + LDR_RES_AT, h_x_base[k]);
+        memcpy(ent[ne] + 0x40, "extra.bin", 9);
+        end = h_x_off[k] + h_x_size[k];
+        ne++;
+    }
     for (i = 0; i < ne; i++) {
         ota_jl_enc(ent[i], 0x50);
         memcpy(h_hdr + 0x40 + i * 0x50u, ent[i], 0x50);
     }
-    ota_wr32(h_hdr + 4, ne == 3u ? h_res_off + h_res_size : 0x400 + sz);
+    ota_wr32(h_hdr + 4, end);
     ota_wr16(h_hdr + 8, p->nent == 2 ? ne : (uint32_t)p->nent);
     ota_wr16(h_hdr + 2, ota_crc16(h_hdr + 0x40, ne * 0x50u, 0));
     ota_wr16(h_hdr, ota_crc16(h_hdr + 2, 0x3E, 0) ^ (p->bad_ufw ? 1u : 0u));
@@ -462,6 +529,11 @@ static int fails, lenient;
  * alone), RES_WHOLE the package's, RES_SOME the package's or without a valid record (the flash failed there) */
 enum { RES_KEPT, RES_WHOLE, RES_SOME };
 static int res_want;
+/* the extra regions after a whole install: X_KEPT as they were, X_WHOLE the package's, X_SOME anything inside them (the
+ * flash failed there), X_BLANK each one the package's, as it was, or its first sector erased (an app's header never
+ * stands over a region the loader left partly written) */
+enum { X_KEPT, X_WHOLE, X_SOME, X_BLANK };
+static int x_want;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("  FAIL [%s] %s:%d: ", case_name, __FILE__, __LINE__); \
                                        printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -495,16 +567,26 @@ static void check_final(uint32_t clo, uint32_t chi)
         int kill = 0;
         if ((a >= clo && a < chi) || (a >= STG_LO && a < STG_HI)) continue;
         if (res_want != RES_KEPT && a - h_res_base < h_res_size) continue;
+        if (x_want != X_KEPT && ((h_xn > 0 && a - h_x_base[0] < h_x_size[0]) ||
+                                 (h_xn > 1 && a - h_x_base[1] < h_x_size[1]))) continue;
         for (i = 0; i < 2u; i++)                         /* in place (zeros), or (its program failed) its sector */
             kill |= (a >= killed[i] && a < killed[i] + 80u && nor[a] == 0) ||
                     ((a & ~0xFFFu) == (killed[i] & ~0xFFFu) && sector_erased(a & ~0xFFFu));
         if (nor[a] != before[a] && !kill) { CHECK(0, "data changed at %#x", a); break; }
     }
-    if (APP_HI < 0x97000u && !(REC_XDATA0 >= clo && REC_XDATA0 < chi) && !lenient)
+    if (APP_HI < 0x97000u && !(REC_XDATA0 >= clo && REC_XDATA0 < chi) && !lenient &&
+        !(x_want != X_KEPT && h_xn && REC_XDATA0 - h_x_base[0] < h_x_size[0]))
         CHECK(!rec_valid(REC_XDATA0), "XDATA0 record not killed");
     if (!(REC_STORE >= clo && REC_STORE < chi))
         CHECK(rec_valid(REC_STORE), "a record lookalike in Felucca's store was touched");
     CHECK(!rec_valid(REC_STOCK), "the stock record is still there");
+    for (i = 0; i < h_xn; i++) {                         /* (X_KEPT: the loop above) */
+        if (x_want == X_WHOLE)
+            CHECK(x_whole(i), "extra region %u is not the package's", i);
+        if (x_want == X_BLANK)
+            CHECK(x_whole(i) || sector_erased(h_x_base[i]) || x_as_was(i),
+                  "extra region %u not whole, nor as it was, and its first sector not blank", i);
+    }
     if (res_want == RES_WHOLE)
         CHECK(res_whole(), "the resource region is not the package's");
     if (res_want == RES_SOME)
@@ -756,6 +838,120 @@ static void res_cases(int fast)
     res_want = RES_KEPT;
 }
 
+/* the extra regions (type 102 entries): written after the app and the resource region, kept, left alone, never in the
+ * open; the first sector last, only over the rest as the package has it */
+#define HAS_X0 (LDR_APP_HI < LDR_DATA_LO)              /* XDATA0's window [LDR_APP_HI, LDR_DATA_LO) is there */
+#define X1_WHOLE(q) ((q).x_n < 2 || x_whole(1))
+static void xres_cases(int fast)
+{
+    const char *m = fast ? "fast" : "classic";
+    const uint32_t same_len = APP_HI - 0x4000u - 0x100u;
+    static const uint32_t bad_base[] = {0x92000u, 0x96000u, 0x97000u, 0xDF000u, 0xE0000u, 0xE4000u, 0xFB000u, 0xFC000u,
+                                        0xE5800u, 0xFFFFF000u};
+    pkg_t q = pkg_default(), r;
+    char nm[96];
+    uint32_t i, all, x_reads;
+    int rc;
+    q.res_len = RES_LEN;                                 /* JV's: XDATA1 first, XDATA0 (the header's) last */
+    q.res_base = RES_BASE;
+    q.x_n = HAS_X0 ? 2 : 1;                              /* (a bigger app area takes XDATA0's window) */
+    q.x_base[0] = 0xE5000u;
+    q.x_len[0] = 0x9000u - 12u;
+    q.x_base[1] = HAS_X0 ? LDR_APP_HI : 0u;
+    q.x_len[1] = HAS_X0 ? LDR_DATA_LO - LDR_APP_HI - 4u : 0u;
+    res_want = RES_WHOLE;
+    x_want = X_WHOLE;
+    snprintf(nm, sizeof nm, "%s: extra: written after the app and res", m);
+    install(nm, &q, same_len, APP_HI, fast, 0, 0);
+    snprintf(nm, sizeof nm, "%s: extra: the same package again", m);
+    begin(nm);
+    rc = run(fast);
+    end(rc, 0);
+    CHECK(n_erase == 0 && n_prog == 0, "%u erases, %u programs", n_erase, n_prog);
+    check_final(0, 0);
+    snprintf(nm, sizeof nm, "%s: extra: another build's over it", m);
+    begin(nm);
+    r = q;
+    r.x_seed = 7;
+    pkg_build(&r);
+    rc = run(fast);
+    end(rc, 0);
+    CHECK(x_whole(0) && X1_WHOLE(q), "the regions are not the new package's");
+    snprintf(nm, sizeof nm, "%s: extra: power cut at op k, resumed", m);
+    cut_sweep(nm, &q, same_len, APP_HI, fast, 0, 0, 0);
+    res_want = RES_SOME;
+    x_want = X_SOME;
+    snprintf(nm, sizeof nm, "%s: extra: flash fails at op k, resumed", m);
+    cut_sweep(nm, &q, same_len, APP_HI, fast, 0, 0, 1);
+    res_want = RES_WHOLE;
+    x_want = X_BLANK;
+    r = q;
+    r.x_flip = 1;
+    snprintf(nm, sizeof nm, "%s: extra: one damaged on the way", m);
+    install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    CHECK(sector_erased(h_x_base[0]) && X1_WHOLE(q), "the damaged one's header written, or the other not");
+    r = q;
+    r.x_rec = 1;
+    snprintf(nm, sizeof nm, "%s: extra: an update record lookalike in one", m);
+    install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    CHECK(sector_erased(h_x_base[0]) && X1_WHOLE(q), "the lookalike's region's header written, or the other not");
+    x_want = X_KEPT;
+    r = q;
+    r.x_n = 1;
+    snprintf(nm, sizeof nm, "%s: extra: a save in the region", m);
+    begin(nm);
+    dev_init(same_len, APP_HI);
+    put_save(r.x_base[0] + 0x2000u);
+    pkg_build(&r);
+    rc = run(fast);
+    end(rc, 0);
+    check_final(0, 0);
+    for (i = 0; i < sizeof bad_base / sizeof bad_base[0]; i++) {
+        r = q;
+        r.x_n = 1;
+        r.x_base[0] = bad_base[i];
+        r.x_len[0] = 0x2000u;
+        snprintf(nm, sizeof nm, "%s: extra: at %#x (not in its windows)", m, bad_base[i]);
+        install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    }
+    r = q;
+    r.x_n = 1;
+    r.x_base[0] = HAS_X0 ? LDR_APP_HI : 0xE5000u;
+    r.x_len[0] = HAS_X0 ? LDR_DATA_LO - LDR_APP_HI + 0x1000u : 0xFC000u - 0xE5000u + 0x1000u;
+    snprintf(nm, sizeof nm, "%s: extra: longer than its window", m);
+    install(nm, &r, same_len, APP_HI, fast, 0, 0);
+    x_want = X_BLANK;
+    snprintf(nm, sizeof nm, "%s: extra: host silent while they come", m);
+    begin(nm);
+    dev_init(same_len, APP_HI);
+    pkg_build(&q);
+    rc = run(fast);
+    all = h_reads;
+    /* the extras' reads, the finish's one with them: a sector's in one read (fast) or eight (classic), each region's
+     * first sector twice. With one region only (a bigger app takes XDATA0's window) the sweep's last steps reach back
+     * past them: silent on the first region's first sector, nothing of the extras is written (as they were, but for
+     * the finish's kill of the stock record in XDATA1); earlier, in the resource region, as res_cases' "host silent" */
+    for (i = 0, x_reads = 1; i < h_xn; i++)
+        x_reads += (fast ? 1u : 8u) * ((h_x_size[i] >> 12) + 1u);
+    for (i = 1; i < (fast ? 14u : 120u); i += fast ? 1u : 7u) {
+        begin(nm);
+        dev_init(same_len, APP_HI);
+        pkg_build(&q);
+        h_mode = H_SILENT_AFTER;
+        h_arg = all - i;                                 /* silent partway through the regions */
+        rc = run(fast);
+        if (i == 1u)
+            end(rc, 0);
+        x_want = i <= x_reads - (fast ? 1u : 8u) ? X_BLANK : X_KEPT;
+        res_want = i <= x_reads ? RES_WHOLE : RES_SOME;
+        check_final(0, 0);
+        if (res_want == RES_SOME)
+            CHECK(!ldr_record(nor + RES_BASE, LDR_RES_MAGIC), "a record over a region the host stopped serving");
+    }
+    res_want = RES_KEPT;
+    x_want = X_KEPT;
+}
+
 int main(void)
 {
     pkg_t p = pkg_default(), q;
@@ -851,6 +1047,10 @@ int main(void)
     for (fast = 0; fast < 2; fast++) {
         printf(" %s: the resource region\n", fast ? "fast" : "classic");
         res_cases(fast);
+    }
+    for (fast = 0; fast < 2; fast++) {
+        printf(" %s: the extra regions\n", fast ? "fast" : "classic");
+        xres_cases(fast);
     }
     printf(" classic only\n");
     bad_host_then_resume("classic: sector 0x10000 changes after the check pass", &p, 0, H_FLIP_LATER, 0x10000);

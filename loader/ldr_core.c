@@ -24,6 +24,8 @@
  *   3b. writes the resource region from the package's res.bin entry, if it has one (ldr_res: an app's read-only
  *      data kept out of its image, fm1-base device/res.c), the app being written already: nothing there decides
  *      whether the FM-1 starts, and a failure there never fails the install (the app does without and says so);
+ *   3c. writes the package's extra regions (ldr_xres: an app's read-only data in the plain windows outside the app
+ *      area and the data area, PLAT_XDATA0 / PLAT_XDATA1 in fm1-base), the same way: never failing the install;
  *   4. asks 0xF0000000 ("success"), then invalidates the update record (RAM
  *      and flash: 4K boundary - 256 between 0x93000 and 0xFC000, outside
  *      Felucca's store, where only user data lives) so the SPL boots the new
@@ -46,7 +48,7 @@
  *   sector comes in (no flash access between)
  *   ldr_res_window(lo, hi) the data area's sectors [lo, hi) open to ldr_erase / ldr_prog while 3b writes them, or
  *                          while the slot switch erases them (0, 0: closed again); the platform keeps the rest of
- *                          the data area shut
+ *                          the data area shut; 3c opens each extra region the same way while it writes it
  * plus the ota.c hooks (frames, time, idle). */
 #define LDR_APP_LO 0x4000u
 #ifndef FL_APP_END
@@ -65,6 +67,12 @@
 #define LDR_RES_AT 0x14u
 #define LDR_RES_MAGIC 0x31534552u               /* "RES1": the region's commit record (fm1-base device/res.c) */
 #define LDR_ST_MAGIC 0x30583058u                /* "X0X0": a saved object's commit record (fm1-base device/storage.c) */
+#define LDR_XRES_TYPE 102u                      /* an extra region (fm1-base tools/fm1pkg_make.py XRES_TYPE): its
+                                                 * flash address at LDR_RES_AT, as res.bin's */
+#define LDR_XRES_MAX 4u                         /* the package's first 4 are written, the rest ignored */
+#define LDR_X1_LO 0xE5000u                      /* the windows an extra region may take: [LDR_APP_HI, LDR_DATA_LO) and,
+                                                 * after the staging (ota.c OTA_AREA, 5 sectors), [LDR_X1_LO,
+                                                 * LDR_REC_HI); never the data area, whose region is res.bin's */
 
 static int ldr_fread(uint32_t off, void *p, uint32_t n);
 static int ldr_erase(uint32_t off);
@@ -389,6 +397,92 @@ out:
     ldr_res_window(0, 0);
 }
 
+/* the package's k-th extra region (type LDR_XRES_TYPE, k < LDR_XRES_MAX, in the package's order): x = its offset,
+ * length, place and the UFW entry's CRC16 of it; 0 if there is none */
+static int ldr_xres_entry(const uint8_t *hdr, uint32_t k, uint32_t *x)
+{
+    uint32_t i;
+    for (i = 0; i < ota_rd16(hdr + 8) && k < LDR_XRES_MAX; i++) {
+        const uint8_t *e = hdr + 0x40 + i * 0x50u;
+        if (ota_rd16(e) == LDR_XRES_TYPE && !k--) {
+            x[0] = ota_rd32(e + 8);
+            x[1] = ota_rd32(e + 12);
+            x[2] = ota_rd32(e + LDR_RES_AT);
+            x[3] = ota_rd16(e + 4);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* an extra region's share of the bar: its length, 0 for one no window holds (never written) */
+static uint32_t ldr_xres_len(const uint32_t *x)
+{
+    return x[1] <= LDR_FL_MAX ? x[1] : 0;
+}
+
+/* 3c. an extra region (x: ldr_xres_entry's) from the package: raw bytes for whole sectors of one window,
+ * [LDR_APP_HI, LDR_DATA_LO) or [LDR_X1_LO, LDR_REC_HI), or nothing is done. The loader keeps no record there: the app
+ * checks what it reads (its own header and CRC, which its tools write too; written last, it stands only over the
+ * rest). Kept when the flash's CRC16 over the region is the entry's (an update that keeps it reads nothing from the
+ * host). Left alone when any of its sectors holds a saved object (storage.c's commit record). Otherwise the first
+ * sector goes blank first, every other sector that differs is written and verified, then the first one, only when
+ * the bytes that came, the first sector read again among them, have the entry's CRC16. A sector of the package's that
+ * reads as an update record at +0xF00 (ldr_finish would kill it, changing the app's data) stops the write there, the
+ * first sector left blank. done, total: the bar */
+static void ldr_xres(const uint32_t *x, uint32_t chunk, uint8_t *sec, uint8_t *cur, uint32_t done, uint32_t total)
+{
+    const uint32_t off = x[0], size = x[1], base = x[2];
+    uint32_t s, c = 0, c0;
+    if (!off || !size || (size & 0xFFFu) || (base & 0xFFFu) ||
+        !((base >= LDR_APP_HI && base < LDR_DATA_LO && size <= LDR_DATA_LO - base) ||
+          (base >= LDR_X1_LO && base < LDR_REC_HI && size <= LDR_REC_HI - base)))
+        return;
+    for (s = base; s < base + size; s += 0x1000u) {
+        if (ldr_fread(s, cur, 0x1000u) || ldr_record(cur, LDR_ST_MAGIC))
+            return;                                      /* (saves there) */
+        c = ota_crc16(cur, 0x1000u, c);
+    }
+    if (c == x[3] || ldr_pkg(off, sec, 0x1000u, chunk))
+        return;                                          /* the package's already (or the host stopped) */
+    c = c0 = ota_crc16(sec, 0x1000u, 0);                 /* (the first sector's, as it comes again at the end) */
+    ldr_res_window(base, base + size);
+    if (ldr_erase(base))                                 /* the first sector (an app's header) goes first */
+        goto out;
+    for (s = base + 0x1000u; s < base + size; s += 0x1000u) {
+        if (ldr_pkg(off + (s - base), sec, 0x1000u, chunk) || ldr_is_record(sec + 0xF00u) ||
+            ldr_fread(s, cur, 0x1000u) || (!ota_memeq(sec, cur, 0x1000u) && ldr_write_sector(s, sec, cur, 0)))
+            goto out;
+        c = ota_crc16(sec, 0x1000u, c);
+        ldr_progress(done += 0x1000u, total);
+    }
+    if (c == x[3] && !ldr_pkg(off, sec, 0x1000u, chunk) && ota_crc16(sec, 0x1000u, 0) == c0 &&
+        !ldr_is_record(sec + 0xF00u))
+        (void)ldr_write_sector(base, sec, cur, 1);
+out:
+    ldr_res_window(0, 0);
+}
+
+/* 3c for every extra region, from done on the bar (each one's length on it, written or not) */
+static void ldr_xres_all(const uint8_t *hdr, uint32_t chunk, uint8_t *sec, uint8_t *cur, uint32_t done,
+                         uint32_t total)
+{
+    uint32_t k, x[4];
+    for (k = 0; ldr_xres_entry(hdr, k, x); k++) {
+        ldr_xres(x, chunk, sec, cur, done, total);
+        ldr_progress(done += ldr_xres_len(x), total);
+    }
+}
+
+/* the extra regions' share of the bar */
+static uint32_t ldr_xres_bytes(const uint8_t *hdr)
+{
+    uint32_t k, x[4], n = 0;
+    for (k = 0; ldr_xres_entry(hdr, k, x); k++)
+        n += ldr_xres_len(x);
+    return n;
+}
+
 /* 4. finish: the host confirms, the record goes, the SPL boots the app */
 static int ldr_finish(uint8_t *b)
 {
@@ -424,7 +518,7 @@ static int ldr_classic(void)
     if ((rc = ldr_head(hdr, sec, &fl_off, &fl_size, &want, &key)) != 0)
         return rc;
     ldr_res_entry(hdr, &r_off, &r_size, &r_base);
-    total = fl_size + (LDR_APP_HI - LDR_APP_LO) + r_size;
+    total = fl_size + (LDR_APP_HI - LDR_APP_LO) + r_size + ldr_xres_bytes(hdr);
     /* 2b. the whole package first: nothing is erased for a damaged one */
     if ((rc = ldr_check(fl_off, fl_size, want, sc, sec, total)) != 0)
         return rc;
@@ -452,6 +546,7 @@ static int ldr_classic(void)
         ldr_progress(fl_size + done, total);
     }
     ldr_res(r_off, r_size, r_base, 512u, sec, cur, fl_size + done, total);
+    ldr_xres_all(hdr, 512u, sec, cur, fl_size + done + r_size, total);
     return ldr_finish(sec);
 }
 
@@ -546,10 +641,11 @@ static int ldr_fast(void)
         return ldr_classic();
     ldr_res_entry(hdr, &r_off, &r_size, &r_base);
     n = fl_size >> 12;
-    total = n * 6u + (LDR_APP_HI - LDR_APP_LO) + r_size;  /* the bar: the table read, then every app sector compared
-                                                          * (kept or written), from 0: not flash.bin's half of the
-                                                          * classic scale, whose check pass takes no time here; then
-                                                          * the resource region's sectors */
+    total = n * 6u + (LDR_APP_HI - LDR_APP_LO) + r_size + ldr_xres_bytes(hdr);   /* the bar: the table read, then
+                                                          * every app sector compared (kept or written), from 0: not
+                                                          * flash.bin's half of the classic scale, whose check pass
+                                                          * takes no time here; then the resource region's sectors and
+                                                          * the extra regions' */
     if (ota_read(LDR_TBL + fl_off, tbl, n * 6u))
         return -7;
     if (!ldr_table_ok(tbl, n, want))
@@ -585,6 +681,7 @@ static int ldr_fast(void)
         ldr_progress(n * 6u + done, total);
     }
     ldr_res(r_off, r_size, r_base, LDR_FAST_CHUNK, sec, cur, n * 6u + done, total);
+    ldr_xres_all(hdr, LDR_FAST_CHUNK, sec, cur, n * 6u + done + r_size, total);
     return ldr_finish(sec);
 }
 
