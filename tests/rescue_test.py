@@ -6,6 +6,7 @@ has is chosen, only its app area is written, the head and the data above it are 
 Made-up images stand in for M-VAVE's packages.  python3 tests/rescue_test.py"""
 import os
 import random
+import struct
 import sys
 import tempfile
 
@@ -52,8 +53,34 @@ def image(seed, end):
     return bytes(rnd.getrandbits(8) for _ in range(end))
 
 
-V15 = image(15, 0x93000)
-V16 = image(16, 0xA9000)
+def entry(name, off, size, data, index):
+    e = bytearray(struct.pack("<HHIIBBH", 0, r.crc16(data), off, size, 2, 0, index) + name.ljust(16, b"\0"))
+    e[0:2] = struct.pack("<H", r.crc16(e[2:]))
+    r.enc(e)
+    return bytes(e)
+
+
+def with_head(img, boot_seed):
+    """IMG with a flash head laid out as the FM-1's: header, then the entries of uboot.boot and isd_config.ini"""
+    img = bytearray(img)
+    img[0x60:0x80] = b"\xFF" * 0x20                        # after the last entry: no valid CRC
+    img[0xA0:0x3938] = image(boot_seed, 0x3938 - 0xA0)
+    set_isd(img, image(boot_seed + 100, 0x2F3))
+    img[0x20:0x40] = entry(b"uboot.boot", 0xA0, 0x3898, img[0xA0:0x3938], 0)
+    return bytes(img)
+
+
+def set_isd(img, data, entry_crc=True, data_crc=True):
+    """isd_config.ini's contents and its entry, the CRCs written as asked"""
+    img[0x3938:0x3938 + len(data)] = data
+    e = bytearray(entry(b"isd_config.ini", 0x3938, 0x2F3, data if data_crc else b"x", 1))
+    if not entry_crc:
+        e[0] ^= 1
+    img[0x40:0x60] = e
+
+
+V15 = with_head(image(15, 0x93000), 150)
+V16 = with_head(image(16, 0xA9000), 160)
 PKGS = [("V15", V15), ("V16", V16)]
 
 
@@ -98,6 +125,49 @@ def main():
         fails(lambda: run(dev, pkgs=pkgs), "not writing")
         assert bytes(dev.flash) == before and not dev.erased
 
+    # V16's head with isd_config.ini rewritten by another tool (fm1-x0x#55): written, the head kept as it is
+    for img in (V15, V16):
+        head = bytearray(img[:r.WRITE_MIN])
+        set_isd(head, bytes(img[0x3938:0x3938 + 0x2F3 - 34]) + b"\x10" * 34)
+        dev = device(head)
+        before = bytes(dev.flash)
+        assert r.isd_changed(img, before) == 34
+        assert run(dev) is True and dev.ran
+        end = len(img)
+        assert bytes(dev.flash[:r.WRITE_MIN]) == bytes(head), "head touched"
+        assert bytes(dev.flash[r.WRITE_MIN:end]) == img[r.WRITE_MIN:end]
+        assert dev.flash[end:] == before[end:]
+        assert min(dev.erased) >= r.WRITE_MIN
+
+    # ... but not when its CRCs are wrong, the entry moved, or anything else in the head differs
+    def bad(change):
+        head = bytearray(V16[:r.WRITE_MIN])
+        change(head)
+        dev = device(head)
+        before = bytes(dev.flash)
+        assert r.isd_changed(V16, before) == 0
+        fails(lambda: run(dev), "not writing")
+        assert bytes(dev.flash) == before and not dev.erased
+    new_isd = b"\x10" * 0x2F3
+    bad(lambda h: set_isd(h, new_isd, data_crc=False))           # stale data CRC
+    bad(lambda h: set_isd(h, new_isd, entry_crc=False))          # broken entry
+    bad(lambda h: h.__setitem__(slice(0x3938, 0x3938 + 0x2F3), new_isd))   # contents changed, CRCs not
+    bad(lambda h: h.__setitem__(0x1000, h[0x1000] ^ 1))          # the bootloader's code
+
+    def moved(h):
+        e = bytearray(h[0x40:0x60])
+        r.enc(e)
+        e[8:12] = struct.pack("<I", 0x2F4)
+        e[0:2] = struct.pack("<H", r.crc16(e[2:]))
+        r.enc(e)
+        h[0x40:0x60] = e
+    bad(moved)                                                   # size changed
+
+    def both(h):
+        set_isd(h, new_isd)
+        h[0x2000] ^= 1
+    bad(both)                                                    # isd_config.ini and the bootloader
+
     # without --write: a check, nothing written
     dev = device(V16)
     before = bytes(dev.flash)
@@ -123,6 +193,21 @@ def main():
                 if n:
                     seen[n] = len(r.package_flash_image(raw))
         assert seen.get("V15", 0x93000) == 0x93000 and seen.get("V16", 0xA9000) == 0xA9000, seen
+        # their heads read as the rescue reads them, and V16's with its isd_config.ini rewritten
+        for f in sorted(os.listdir(sd)):
+            raw = open(os.path.join(sd, f), "rb").read() if f.endswith(".fwsc") else b""
+            if r.STOCK.get(hashlib.sha256(raw).hexdigest()) == "V16":
+                img = r.package_flash_image(raw)
+                at, e = r.head_entries(img)[b"isd_config.ini"]
+                off, size = struct.unpack_from("<II", e, 4)
+                head = bytearray(img[:r.WRITE_MIN])
+                head[off:off + 34] = b"\x10" * 34
+                e = bytearray(e)
+                e[2:4] = struct.pack("<H", r.crc16(head[off:off + size]))
+                e[0:2] = struct.pack("<H", r.crc16(e[2:]))
+                r.enc(e)
+                head[at:at + 0x20] = e
+                assert r.isd_changed(img, bytes(head) + img[r.WRITE_MIN:]) > 0
         print(f"  stock packages: {seen}")
     print("rescue_test: ok")
 

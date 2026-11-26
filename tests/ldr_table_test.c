@@ -35,6 +35,7 @@ static void ldr_record_clear(void) {}
 static int ldr_erase_begin(uint32_t off) { (void)off; return -1; }
 static int ldr_erase_end(void) { return -1; }
 static void ldr_progress(uint32_t done, uint32_t total) { (void)done; (void)total; }
+static void ldr_res_window(uint32_t lo, uint32_t hi) { (void)lo; (void)hi; }
 #include "../loader/ldr_core.c"
 
 static int fails;

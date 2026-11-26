@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MPL-2.0
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+ * Copyright (C) 2026 hdavid (the sliced erase: fl_erase_window_ram, fl_erase4k_sliced and the hooks, from Optimist)
  * Copyright (C) 2026 Kerem Kilic (Ellic Studio): configurable policy and access guards
  * Copyright (c) 2026 Julius Vitkauskas (busy-safe completion)
  * Written against the public JieLi AC79 SDK (Apache-2.0); see NOTICE. */
@@ -13,6 +14,12 @@
  * regions before inclusion (fm1_flash_policy.h); see docs/FLASH.md. Same sequence as the AC79 SDK flash driver
  * (cpu.a/vm_sfc.c.o: enter_spi_code, norflash_erase, norflash_wait_ok, exit_spi_code).
  *
+ * The XIP side (below): fl_erase4k, a sector erase in one interrupts-off window (P25Q80H: 8 ms typical, 17 ms
+ * measured on an FM-1: the audio DMA loops its buffer meanwhile, so the caller silences it first), and fl_write, one
+ * window per 256-byte page. With FL_ERASE_SLICED 1, fl_erase4k_sliced too: the erase suspended and resumed in windows
+ * of about 1 ms (fm1_flash_slice.h), the interrupts on between them, so a firmware may erase while it plays.
+ * FM1_FLASH_ENTER() / FM1_FLASH_LEAVE(): the firmware's own step inside every window of these, after the interrupts
+ * are off and before they are on again (a second core taken off the flash, a measurement); none by default.
  * An erase or program never returns to XIP while the part still reports BUSY
  * (fl_wait_issued, fm1_flash_wait.h): it polls past the normal bound and, if the
  * part is still busy at the extended bound, resets the part and then the chip,
@@ -24,6 +31,14 @@
 #include "fm1_flash_policy.h"
 #include "fm1_flash_access.h"
 
+/* RAM code only the update loader calls (fl_status_ram, the erase while it receives): kept in the loader (FELUCCA_LOADER)
+ * as every RAMFN is (used); in an app without used, so the compiler drops it unless the app calls it (1.3 KB of RAM). A
+ * host test's own RAMFN stands for both */
+#if defined(FELUCCA_LOADER) || defined(RAMFN)
+#define RAMFN_LDR RAMFN
+#else
+#define RAMFN_LDR __attribute__((section(".ram_text"), noinline))
+#endif
 #ifndef RAMFN
 #define RAMFN  __attribute__((section(".ram_text"), noinline, used))
 #endif
@@ -54,6 +69,10 @@ static inline void *fl_far(void *p) { void *volatile q = p; return q; }
 #define PORTD_DIR       REG32(0x500C8u)
 #define CACHE_CON       REG32(0x1EEE008u)          /* b14 = cache idle */
 #define T4_CNT          REG32(0x10804u)            /* TIMER4, 24 MHz free-running */
+
+#ifndef FL_ERASE_SLICED
+#define FL_ERASE_SLICED 0                          /* 1: fl_erase4k_sliced (RAM code: only firmwares that ask pay for it) */
+#endif
 
 #define FL_XIP(off)     FM1_XIP(off)              /* fm1_xip.h */
 typedef struct { uint32_t sfc_con, spi_con; } fl_saved_t;
@@ -169,7 +188,7 @@ RAMINL void fl_reset_busy(void)
 
 /* ---- entry points: IRQs OFF, args/buffers in RAM ---- */
 
-static RAMFN uint32_t fl_jedec_ram(void)                 /* expect 0x856014 */
+static RAMFN uint32_t fl_jedec_ram(void)                 /* 0x856014 (Puya P25Q80) or 0xB36014 (UC25HQ80) */
 {
     fl_saved_t s; uint32_t id;
     if (fl_enter(&s)) return 0;
@@ -198,7 +217,7 @@ static RAMFN int fl_uid_ram(uint8_t *dst)
 }
 #endif
 
-static RAMFN uint32_t fl_status_ram(void)                /* SR1 | SR2 << 8 */
+static RAMFN_LDR uint32_t fl_status_ram(void)                /* SR1 | SR2 << 8 */
 {
     fl_saved_t s; uint32_t v;
     if (fl_enter(&s)) return 0xFFFFFFFFu;
@@ -232,7 +251,7 @@ static RAMFN int fl_erase4k_ram(uint32_t off, uint32_t *took_us)
  * as fl_erase4k_ram's) and gives the XIP back. Between the two nothing may touch the flash. Begin takes the same checks
  * as fl_erase4k_ram (the write regions, the flash gate: CPU0, interrupts off, CPU1 idle); *s and *issued (the caller's
  * RAM, kept for end) get the saved SFC / SPI state and the command's time */
-static RAMFN int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s, uint32_t *issued)
+static RAMFN_LDR int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s, uint32_t *issued)
 {
     if (!FL_WRITE_OK(off, 0x1000u) || (off & 0xFFFu))
         return FL_ERR_RANGE;
@@ -247,12 +266,41 @@ static RAMFN int fl_erase4k_begin_ram(uint32_t off, fl_saved_t *s, uint32_t *iss
     fl_inval(off, 4096u);
     return 0;
 }
-static RAMFN int fl_erase4k_end_ram(const fl_saved_t *s, uint32_t issued, uint32_t *took_us)
+static RAMFN_LDR int fl_erase4k_end_ram(const fl_saved_t *s, uint32_t issued, uint32_t *took_us)
 {
     int rc = fl_wait_split(issued, 500000u, 2000000u, took_us);   /* generic NOR max 400 ms */
     fl_exit(s);
     return rc;
 }
+
+#if FL_ERASE_SLICED
+/* one window of a sector erase in short windows (fm1_flash_slice.h: fls_window, all of it inlined here: nothing it
+ * runs is in the flash). FLS_START issues the erase, FLS_RESUME resumes it; it runs for j->slice_us and is suspended,
+ * or ends. IRQs OFF, j in RAM */
+#define FLS_INL     RAMINL
+#define FLS_NOW()   T4_CNT
+#define FLS_SR1()   fl_rdsr(0x05)
+#define FLS_SR2()   fl_rdsr(0x35)
+#define FLS_ERASE(off) do { fl_cs(0); fl_tx(0x20); fl_addr(off); fl_cs(1); } while (0)
+#define FLS_CMD(c)  do { fl_cs(0); fl_tx((uint8_t)(c)); fl_cs(1); } while (0)
+#define FLS_INVAL(off) fl_inval(off, 4096u)
+#ifndef FLS_GAP                                    /* between two windows, the interrupts on and the XIP back */
+#define FLS_GAP()   do { uint32_t g0 = T4_CNT; while (T4_CNT - g0 < 20u * 24u) ; } while (0)   /* 20 us */
+#endif
+#define FLS_WINDOW_FN fl_erase_window
+#include "fm1_flash_slice.h"
+
+static RAMFN int fl_erase_window_ram(uint32_t off, uint32_t op, fls_job_t *j)
+{
+    fl_saved_t s; int rc;
+    if (!FL_WRITE_OK(off, 0x1000u) || (off & 0xFFFu))
+        return FL_ERR_RANGE;
+    { int e = fl_enter(&s); if (e) return e; }
+    rc = fls_window(off, op, j);
+    fl_exit(&s);
+    return rc;
+}
+#endif
 
 static RAMFN int fl_prog_ram(uint32_t off, const uint8_t *src, uint32_t n, uint32_t *took_us)
 {

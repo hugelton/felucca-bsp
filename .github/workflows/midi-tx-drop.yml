@@ -1,0 +1,15 @@
+name: MIDI IN to a host that does not read
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  midi-tx-drop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: chip/usb.c ep1_tx drops what waits when nobody reads (FELUCCA_MIDI_TX_STALL_POLLS)
+        env:
+          CC: clang
+        run: tests/run_midi_tx_drop_test.sh

@@ -79,13 +79,14 @@ static void devices_init(void)
 }
 
 /* --------------------------------------------------- the SIE and bus --- */
-static uint8_t regs[5][32], common[16], index_reg, rsp[512];     /* EP0..EP4 (EP4: the audio stream) */
+static uint8_t regs[8][32], common[16], index_reg, rsp[512];
 static uint32_t rsp_len, rsp_pos, ep_cnt[5];
 static void *ep_radr[5];
 static void *ep_tadr[5];
 static uint32_t USB_CON0, line_state;
 static uint8_t bus_dead;                /* nothing answers (cable pulled) */
 static uint8_t ep0_timeout;             /* SETUP stays busy until the driver's deadline */
+static uint32_t slow_until;              /* nothing answers before this many root resets (a device slow after a reset) */
 static uint8_t devctl_ls;               /* the device is low speed */
 static uint32_t ctl_requests, setup_requests, rx_toggle_clears;
 static uint32_t tx_toggle_clears, off_count;
@@ -228,10 +229,13 @@ static void deliver_rx(void)            /* an IN request is pending on EP1 and t
     regs[1][20] = 1;
 }
 
+static int csr0_rx_kept;                                /* EP0 as the device's: writing 0 clears SentStall only */
 static void mock_write(uint32_t r, uint32_t v)
 {
     if (r == 14) {
         index_reg = (uint8_t)v;
+    } else if (csr0_rx_kept && index_reg == 0 && r == 17 && !v) {
+        regs[0][17] &= 1u;                              /* the device's SentStall cleared: RxPktRdy stays */
     } else if (r == 1 && (v & 8u)) {                    /* POWER: bus reset */
         bus_reset();
         common[r] = (uint8_t)v;
@@ -245,7 +249,7 @@ static void mock_write(uint32_t r, uint32_t v)
             memcpy(s, ep_radr[0], 8);
             if (ep0_timeout)
                 regs[0][17] = 2;
-            else if (bus_dead || !d || !answer(d, s))
+            else if (bus_dead || !d || root_resets < slow_until || !answer(d, s))
                 regs[0][17] = 0x10;                     /* no answer */
             else
                 regs[0][17] = 0;
@@ -357,6 +361,9 @@ static void fm1_delay_ms(uint32_t ms) { (void)ms; }
 #define FELUCCA_OTA 0
 #define FELUCCA_USB_HOST TEST_HOST
 #define FELUCCA_UAC_48K TEST_48K
+static uint64_t pace_t, pace_tick_num = 1u, pace_tick_den = 2500u;   /* test_uac_pace's time and crystal */
+static uint32_t pace_clock(void) { return (uint32_t)(pace_t * pace_tick_num / pace_tick_den); }
+#define FELUCCA_UAC_CLOCK() pace_clock()
 #define FELUCCA_UAC_OUT TEST_OUT
 #define HALF_FRAMES 128u
 static volatile uint32_t render_peak;
@@ -364,6 +371,10 @@ static volatile uint8_t render_busy;
 static uint8_t sx_seen[8];                              /* FELUCCA_SYSEX_BYTE: the bytes the hook saw */
 static uint32_t sx_seen_n;
 #define FELUCCA_SYSEX_BYTE(b) (sx_seen_n < sizeof sx_seen ? (void)(sx_seen[sx_seen_n++] = (b)) : (void)0)
+#ifdef TEST_SERIAL
+const char *test_serial_fn(void) { return "0123456789ABCDEF"; }   /* FELUCCA_USB_SERIAL_FN: this device's serial number */
+#define FELUCCA_USB_SERIAL_FN test_serial_fn
+#endif
 #include "../chip/usb.c"
 
 /* ------------------------------------------- the device's descriptors --- */
@@ -424,6 +435,18 @@ static uint32_t check_descriptors(int cdc_on, int verbose)
     usb_cdc_on = (uint8_t)cdc_on;
 #endif
     assert(get_desc(0x0100, &dv, &dl) && dl == 18 && dv[0] == 18 && dv[1] == 1);
+#ifdef TEST_SERIAL
+    {   /* the serial number: string USB_STR_SERIAL (0x30 on our line, clear of the audio's names), the function's, whole */
+        const uint8_t *sd;
+        uint16_t sl;
+        assert(dv[16] == USB_STR_SERIAL);
+        assert(get_desc(0x0300 | USB_STR_SERIAL, &sd, &sl) && sd[1] == 3 && sl == sd[0] && sl == 2u + 2u * 16u);
+        for (uint32_t j = 0; j < 16u; j++)
+            assert(sd[2 + 2 * j] == (uint8_t)"0123456789ABCDEF"[j] && sd[3 + 2 * j] == 0);
+    }
+#else
+    assert(dv[16] == 0);                                /* no serial number */
+#endif
     assert(get_desc(0x0200, &c, &cl) && c[1] == 2);
     assert((c[2] | c[3] << 8) == cl);                   /* wTotalLength: the whole descriptor */
     memset(f, 0, sizeof f);
@@ -632,6 +655,7 @@ static void connect(int which)
     devices_init();
     root = which;
     bus_dead = devctl_ls = ep0_timeout = 0;
+    slow_until = 0;
     memset(common, 0, sizeof common);
     memset(regs, 0, sizeof regs);
     dflt = 0;
@@ -889,6 +913,20 @@ static void test_idle_hub(int with_stick)
            with_stick ? "with a stick" : "empty");
 }
 
+/* a device that answers nothing until the third reset (its recovery 400 ms: an Elektron Digitone II, NO MIDI 1 -1 before):
+ * enumerated, the resets stopped there */
+static void test_slow_device(void)
+{
+    connect(KBD);
+    slow_until = 3;
+    host_on();
+    int e = enumerate();
+    assert(e && uh.msg == UH_MSG_MIDI && root_resets == 3);
+    usb_host_switch(0); usb_host_task(fm1_ms); uh.msg = 0;
+    slow_until = 0;
+    printf("USB host: a device answering after the third root reset (400 ms): found: OK\n");
+}
+
 static void test_failed_probe(void)
 {
     connect(-1);                                      /* a powered line with nothing answering EP0 */
@@ -903,7 +941,7 @@ static void test_failed_probe(void)
         usb_host_task(now);
         assert(fm1_ms == now && !uh.run && !uh.msg);
     }
-    assert(root_resets == 1 && host_attaches == 1 && setup_requests == requests);
+    assert(root_resets == UH_ROOT_TRIES && host_attaches == 1 && setup_requests == requests);   /* (reset again, longer: uh_connect) */
     usb_host_switch(0); usb_host_task(fm1_ms); uh.msg = 0;
 
     connect(HUB);
@@ -1066,6 +1104,20 @@ static void test_endpoint_selection(void)
     assert(!uh_parse_midi(d, sizeof d, &m));
     d[32] = 0; d[38] = 0;                             /* invalid packet size */
     assert(!uh_parse_midi(d, sizeof d, &m));
+    {   /* Elektron Digitone II (1935:0134), its descriptor as read: bulk 512 on both MIDI endpoints, given to a
+         * full-speed host as well (it stalls the device qualifier): used as 64 */
+        static const uint8_t dn2[] = {
+            0x09,0x02,0x65,0x00,0x02,0x01,0x00,0xc0,0x03, 0x09,0x04,0x00,0x00,0x00,0x01,0x01,0x00,0x00,
+            0x09,0x24,0x01,0x00,0x01,0x09,0x00,0x01,0x01, 0x09,0x04,0x01,0x00,0x02,0x01,0x03,0x00,0x00,
+            0x07,0x24,0x01,0x00,0x01,0x41,0x00, 0x06,0x24,0x02,0x01,0x01,0x00, 0x06,0x24,0x02,0x02,0x02,0x00,
+            0x09,0x24,0x03,0x01,0x03,0x01,0x02,0x01,0x00, 0x09,0x24,0x03,0x02,0x04,0x01,0x01,0x01,0x00,
+            0x09,0x05,0x01,0x02,0x00,0x02,0x00,0x00,0x00, 0x05,0x25,0x01,0x01,0x01,
+            0x09,0x05,0x81,0x02,0x00,0x02,0x00,0x00,0x00, 0x05,0x25,0x01,0x01,0x03};
+        assert(sizeof dn2 == 101u);
+        assert(uh_parse_midi(dn2, sizeof dn2, &m) && m.iface == 1 && m.in_ep == 1 && m.in_mps == 64 && m.out_ep == 1 &&
+               m.out_mps == 64);
+        printf("USB host: Digitone II's high-speed bulk 512 taken as 64: OK\n");
+    }
     /* A receive-only controller rejects output; an output-only synth is still enumerated. */
     connect(KBD); kbd_cfg_len = build_kbd_cfg(kbd_cfg, 0);
     host_on(); assert(enumerate() && uh.in_ep && !uh.out_mps && !midi_out_try(0x643c9009u));
@@ -1139,6 +1191,7 @@ int main(void)
     test_idle_hub(0);
     test_idle_hub(1);
     test_failed_probe();
+    test_slow_device();
     test_hub_synth_unplug();
     test_host_output(0);
     test_host_output(1);
@@ -1154,20 +1207,40 @@ int main(void)
 
 #else
 #if FELUCCA_UAC
-/* The packets' pacing: renders of HALF_FRAMES on the FM-1's I2S clock (6 MHz / 136, its crystal ppm off), a packet a
- * ms on the host's. The stream must hold (no underrun, no overrun), carry the I2S clock's frames, and never steer two
- * packets in a row: a host that follows an asynchronous device's rate closely (iOS's Camera) filled the 5..6 short
- * packets of the old steering with silence. Time in 1/60 GHz: a ms is 60,000,000, a render 174,080,000 */
-static void test_uac_pace(int r48, int32_t ppm)
+/* The packets' pacing: renders of HALF_FRAMES on the FM-1's I2S clock (its crystal / 544, the crystal ppm off), late
+ * by up to lag_q16 halves (Q16; audio_ahead's long renders land up to two halves late), polls at 2 kHz on the crystal,
+ * an IN token a ms on the host's, which takes the packet the first poll after the last one queued. The frames sent
+ * must follow the crystal's I2S frames, not the renders: within the loop's phase band over every 4 s from the start
+ * (+-0.39 % for minutes was what a late render did to the old steering), corrected a frame at a time, never two
+ * packets in a row (a host that follows an asynchronous device's rate closely, iOS's Camera, filled the 5..6 short
+ * packets of the old steering with silence), hardly at all once the pattern's rate has the host's ms; the ring may
+ * run dry only while its first renders find how late they land. Time in 1/60 GHz: a ms is 60,000,000, a crystal tick
+ * (24 MHz) 2,500 */
+static uint32_t pace_rand = 12345u;
+static uint32_t pace_rnd(uint32_t n) { pace_rand = pace_rand * 1103515245u + 12345u; return (pace_rand >> 8) % n; }
+#if UA_MC || UA_IN_PLAIN
+#define UAC_PKT(p) uac_packet(p)
+#else
+#define UAC_PKT(p) uac_packet((uint8_t *)(p), 0)   /* (the general input: the packet as bytes, 16-bit) */
+#endif
+static void test_uac_pace(int r48, int32_t ppm, uint32_t lag_q16)
 {
-    const uint64_t MS = 60000000u, REND = 174080000u + (uint64_t)((int64_t)174080 * ppm / 1000);
-    uint64_t t_r = REND / 3u, t_p = 0;
-    uint32_t pkts = 0, adj_prev = 0, adjs = 0, runs = 0, lo_n = 99, hi_n = 0, base = r48 ? 48u : 44u;
-    uint32_t under0 = 0, over0 = 0;
-    uint64_t sent = 0, made = 0;
+    const uint64_t MS = 60000000u, REND = 174080000u + (uint64_t)((int64_t)174080 * ppm / 1000), POLL = REND * 12000u / (HALF_FRAMES * 544u);
+    uint64_t t_half = REND / 3u, t_r, t_poll = 0, t_in = MS / 3u, made = 0, sent = 0, t0 = 0, sent0 = 0;
+    uint32_t pkts = 0, adj_prev = 0, adjs = 0, adjs_late = 0, runs = 0, lo_n = 99, hi_n = 0, base = r48 ? 48u : 44u;
+    uint32_t under0 = 0, over0 = 0, q = 0, n_q = 0, win = 0;
+    int64_t worst = 0;
     static int32_t out[2u * HALF_FRAMES];
     static uint32_t pk[(UAC_MAXP + 3u) / 4u];
+    if (UA_PRIME + (uint64_t)HALF_FRAMES * lag_q16 / 65536u + HALF_FRAMES + UA_MAXF > UA_N) {
+        printf("USB audio pacing, renders up to %.1f halves late: not for a %u-frame ring\n", lag_q16 / 65536.0,
+               (unsigned)UA_N);                         /* (FELUCCA_UAC_CH's smallest: FELUCCA_UAC_RING_FRAMES) */
+        return;
+    }
     memset(&uac, 0, sizeof uac);
+    pace_t = 0;
+    pace_tick_num = HALF_FRAMES * 544u;                 /* the crystal's ticks a render */
+    pace_tick_den = REND;
     usb.config = 1;
     uac.alt = 1;
     uac.flowing = 1;
@@ -1177,45 +1250,127 @@ static void test_uac_pace(int r48, int32_t ppm)
     assert(!r48);
 #endif
     ua_w = ua_r = 0;
+    t_r = t_half + REND * (uint64_t)pace_rnd(lag_q16 + 1u) / 65536u;
     while (pkts < 61000u) {
-        if (t_r <= t_p) {                               /* the audio interrupt: a render */
+        uint64_t t = t_r < t_poll ? t_r : t_poll;
+        t = t < t_in ? t : t_in;
+        pace_t = t;
+        if (t == t_r) {                                 /* the audio interrupt: a render, landing late by its lag */
             uint32_t k;
             uac_render_start();
             for (k = 0; k < 2u * HALF_FRAMES; k++)
                 out[k] = 1000 << 8;
             uac_tap(out, HALF_FRAMES);
-            if (pkts >= 1000u)
-                made += HALF_FRAMES;
-            t_r += REND;
-        } else {                                        /* the host's IN token, once a ms */
-            uint32_t a0 = uac.adj_up + uac.adj_down, n = uac_packet(pk), adj;
-            adj = uac.adj_up + uac.adj_down - a0;
-            if (++pkts == 1000u)                        /* a second to settle, then counted */
-                under0 = uac.underruns, over0 = uac.overruns;
-            if (pkts > 1000u) {
+            made += HALF_FRAMES;
+            t_half += REND;
+            t_r = t_half + REND * (uint64_t)pace_rnd(lag_q16 + 1u) / 65536u;
+            if (t_r <= t)                               /* (one after another) */
+                t_r = t + 1u;
+        } else if (t == t_in) {                         /* the host's IN token, once a ms: the queued packet */
+            if (q) {
+                uint32_t n = n_q;
+                q = 0;
+                if (++pkts == 1000u)                    /* a second to settle, then counted */
+                    under0 = uac.underruns, over0 = uac.overruns;
                 sent += n;
-                adjs += adj;
-                runs += adj && adj_prev;
-                lo_n = n < lo_n ? n : lo_n;
-                hi_n = n > hi_n ? n : hi_n;
+                if (pkts > 1000u) {
+                    lo_n = n < lo_n ? n : lo_n;
+                    hi_n = n > hi_n ? n : hi_n;
+                }
+                if (pkts % 4000u == 0u) {               /* every 4 s: the frames sent against the crystal's */
+                    double want = (double)(t - t0) * (double)pace_tick_num / (double)pace_tick_den / 544.0
+                                  * (r48 ? 160.0 / 147.0 : 1.0);
+                    int64_t d = (int64_t)(sent - sent0) - (int64_t)(want + 0.5);
+                    if (win++)
+                        worst = d > worst ? d : -d > worst ? -d : worst;
+                    t0 = t;
+                    sent0 = sent;
+                }
             }
-            adj_prev = adj;
-            t_p += MS;
+            t_in += MS;
+        } else {                                        /* a poll (2 kHz on the crystal): queue the next packet */
+            if (!q) {
+                uint32_t a0 = uac.adj_up + uac.adj_down, adj;
+                n_q = UAC_PKT(pk);
+                q = 1;
+                adj = uac.adj_up + uac.adj_down - a0;
+                adjs += adj;
+                if (pkts > 40000u)
+                    adjs_late += adj;
+                runs += adj && adj_prev;
+                adj_prev = adj;
+            }
+            t_poll += POLL;
         }
     }
-    assert(uac.underruns == under0 && uac.overruns == over0);
-    assert(runs == 0);                                  /* never two steered packets in a row */
-    assert(lo_n >= base - 1u && hi_n <= base + 2u && hi_n <= UA_MAXF);
-    if (!ppm)                                           /* the pattern alone carries the I2S clock: hardly steered */
-        assert(adjs <= 60u);
+    assert(uac.overruns == over0);
+    assert(uac.underruns - under0 <= (lag_q16 ? 8u : 0u));   /* (a later render than any before: a hold) */
+    assert(runs == 0);                                  /* never two corrected packets in a row */
+    assert(lo_n >= base - 2u && hi_n <= base + 2u && hi_n <= UA_MAXF);
+    assert(worst <= 2 * UA_BAND + 4);                   /* the rate: the crystal's, within the phase band */
+    assert(adjs_late <= 8u);                            /* the pattern has the host's ms by then */
     {   /* the frames sent follow the frames made (at 48 kHz, x 160 / 147), within the ring */
         int64_t want = r48 ? (int64_t)(made * 160u / 147u) : (int64_t)made, d = (int64_t)sent - want;
         assert(d < (int64_t)UA_N && d > -(int64_t)UA_N);
     }
     uac.alt = 0;
     usb.config = 0;
-    printf("USB audio pacing, %s, crystal %+d ppm: 60 s, %u..%u frames a packet, %u steered, none in a row: OK\n",
-           r48 ? "48 kHz" : "44.1 kHz", (int)ppm, (unsigned)lo_n, (unsigned)hi_n, (unsigned)adjs);
+    printf("USB audio pacing, %s, crystal %+d ppm, renders up to %.1f halves late: 60 s, %u..%u frames a packet, "
+           "%u corrected (%u in the last 20 s), none in a row, the crystal's rate within %d frames every 4 s, %u held (the first second too): OK\n",
+           r48 ? "48 kHz" : "44.1 kHz", (int)ppm, lag_q16 / 65536.0, (unsigned)lo_n, (unsigned)hi_n, (unsigned)adjs,
+           (unsigned)adjs_late, (int)worst, (unsigned)uac.underruns);
+}
+#endif
+#if FELUCCA_UAC && !UA_MC
+/* a ring run dry: the packet holds the last frame and UA_HOLD more (the next packet starts with them), then the
+ * frames go on where they stopped: none lost, none repeated but the hold */
+static void test_uac_hold(void)
+{
+    static int32_t out[2u * HALF_FRAMES];
+    static uint32_t pk[(UAC_MAXP + 3u) / 4u];
+    uint32_t k, got = 0, held = 0, next = 1, i, n, prev = 0;
+    memset(&uac, 0, sizeof uac);
+    usb.config = 1;
+    uac.alt = 1;
+    uac.flowing = 1;
+    ua_w = ua_r = 0;
+    uac_render_start();                                 /* primed: UA_PRIME frames of silence */
+    for (k = 0; k < HALF_FRAMES; k++)
+        out[2u * k] = (int32_t)(k + 1u) << 8, out[2u * k + 1u] = 0;
+    uac_tap(out, HALF_FRAMES);
+    for (i = 0; i < 40u; i++) {                         /* the packets: past the ring's end, and two more */
+        n = UAC_PKT(pk);
+        for (k = 0; k < n; k++) {
+            uint32_t v = pk[k] & 0xFFFFu;
+            if (!v && next == 1u)
+                continue;                               /* the priming's silence */
+            if (v == next)
+                next++, got++;
+            else
+                assert(v == prev), held++;              /* a hold: the last frame again */
+            prev = v;
+        }
+    }
+    assert(got == HALF_FRAMES && uac.underruns > 0u && held >= UA_HOLD);
+    uac_render_start();                                 /* the next render: its frames follow at once */
+    for (k = 0; k < HALF_FRAMES; k++)
+        out[2u * k] = (int32_t)(HALF_FRAMES + k + 1u) << 8;
+    uac_tap(out, HALF_FRAMES);
+    for (i = 0; i < 2u; i++) {
+        n = UAC_PKT(pk);
+        for (k = 0; k < n; k++) {
+            uint32_t v = pk[k] & 0xFFFFu;
+            assert(v == next || (v == prev && uac.owe + n > k));   /* (the hold's rest, then the frames in order) */
+            if (v == next)
+                next++;
+            prev = v;
+        }
+    }
+    assert(next > HALF_FRAMES + 2u);
+    uac.alt = 0;
+    usb.config = 0;
+    printf("USB audio: a ring run dry holds the last frame, %u frames past it, and goes on where it stopped: OK\n",
+           (unsigned)UA_HOLD);
 }
 #endif
 #if UA_MC
@@ -1287,13 +1442,18 @@ int main(void)
 #if FELUCCA_UAC
     {
         static const int32_t PPM[3] = {0, 200, -200};
-        int i;
-        for (i = 0; i < 3; i++) {
-            test_uac_pace(0, PPM[i]);
-#if FELUCCA_UAC_48K
-            test_uac_pace(1, PPM[i]);
+#if !UA_MC
+        test_uac_hold();
 #endif
-        }
+        static const uint32_t LAG[3] = {0, 13107u, 117965u};   /* renders on time, up to 0.2 and 1.8 halves late */
+        int i, j;
+        for (i = 0; i < 3; i++)
+            for (j = 0; j < 3; j++) {
+                test_uac_pace(0, PPM[i], LAG[j]);
+#if FELUCCA_UAC_48K
+                test_uac_pace(1, PPM[i], LAG[j]);
+#endif
+            }
     }
 #endif
     usb_start();
@@ -1324,10 +1484,27 @@ int main(void)
         midi_in_event(0x06u | 0x02u << 8 | 0xF7u << 16);
         assert(sx_seen_n == 5u && memcmp(sx_seen, SX, 5u) == 0);
     }
+    {   /* a SETUP that came while the STALL before it was still unserviced: answered in the same pass (felucca-bsp#28;
+         * the interrupt that brought the poll was its, and no other comes) */
+        static const uint8_t SET_ADDR[8] = {0x00, 0x05, 9, 0, 0, 0, 0, 0};
+        uint32_t n = usb.setups;
+        memcpy(ep0buf, SET_ADDR, 8);
+        usb.e0_tx = 0;
+        sie_wr(S_INDEX, 0);
+        csr0_rx_kept = 1;
+        regs[0][17] = 0x05;                             /* SentStall + RxPktRdy */
+        ep0_service();
+        csr0_rx_kept = 0;
+        assert(usb.setups == n + 1u && regs[0][17] == 0x48 && usb.has_pend_addr && usb.pend_addr == 9);
+        usb.has_pend_addr = 0;
+        regs[0][17] = 0x04;                             /* SentStall alone: cleared, nothing taken */
+        ep0_service();
+        assert(usb.setups == n + 1u && !regs[0][17]);
+    }
     usb_detach();
     usb_retry(5000u);
     assert(!usb.up);
-    puts("USB device-only/loader: startup, MIDI output, the SysEx byte hook and detach: OK");
+    puts("USB device-only/loader: startup, MIDI output, the SysEx byte hook, a SETUP behind a STALL and detach: OK");
     return 0;
 }
 #endif

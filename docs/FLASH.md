@@ -41,9 +41,15 @@ The legacy `FL_DATA_*`, `FL_GLOB_*`, `FL_AUTO_*`, `FL_OTA_*`, `FL_XDATA*`,
 `FL_STORE_OK` and `FL_XDATA_OK` names remain available in `fm1_flash_policy.h`.
 They do not add write permissions when an application supplies its own policy.
 
-The updater has a separate, unchanged write policy: application sectors
+The updater has a separate write policy: application sectors
 `0x4000..0x97000` and update records `0xE0000..0xFC000`. Changing runtime data
-regions does not change what the updater overwrites or preserves. Its app image
+regions does not change what the updater overwrites or preserves. One more range
+opens only when the package asks for it: a package with a `res.bin` entry (type
+101, its flash address at byte `0x14` of the entry) has the loader write that
+resource region after the app, in whole sectors of `0x97000..0xE0000`. The
+loader leaves the region alone if any of its sectors starts with a saved
+object's commit record ("X0X0"), and writes the region's own commit record
+("RES1") last, only over a payload that matches its CRC-32. Its app image
 ends below `0x93000`, but it can erase the rest of the containing application
 window. In the extra-data regions, keep bytes `0xF00..0xF07` of every 4 KiB sector
 erased (or unlike an update record): the loader searches there for records to

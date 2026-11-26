@@ -6,10 +6,12 @@
  * 1 MiB file mapped shared, so a killed process leaves it as a power cut would (between two flash operations), and the
  * next run is the loader the SPL starts again at the next power-on.
  *
- *   ldr_pipe init FLASH IMAGE   a device (head with its chip key, an installed app, data, the staged loader and its
+ *   ldr_pipe init FLASH IMAGE [res]
+ *                               a device (head with its chip key, an installed app, data, the staged loader and its
  *                               record, the stock firmware's record) in FLASH, and a package for it whose logical
  *                               image (what the host serves: the UFW header, then flash.bin; every third app sector
- *                               new; the Felucca loader's mark where ota.bin would be) goes to IMAGE
+ *                               new; the Felucca loader's mark where ota.bin would be; with res, a res.bin entry
+ *                               after flash.bin: a resource region of RES_SIZE for RES_BASE) goes to IMAGE
  *   ldr_pipe rearm FLASH        the update record back (the loader runs again: the same package once more)
  *   ldr_pipe run FLASH          the loader: the handshake, the fast install's hello, sessions on the upgrade command
  *                               (F0 22 24 35 7F F7); exits 0 when a session finished (the FM-1 restarts), 3 at the
@@ -113,11 +115,13 @@ static void ota_show(uint32_t step, int32_t code) { (void)step; (void)code; }
 static void ota_commit(const uint8_t *parm) { (void)parm; }
 #include "../chip/ota.c"
 
-/* ---- the flash: loader.c's FL_RANGE_OK ---- */
+/* ---- the flash: loader.c's FL_RANGE_OK, the resource region's window included ---- */
+static uint32_t res_lo, res_hi;
 static int in_range(uint32_t off, uint32_t n)
 {
     return (off >= 0x4000u && n <= 0x97000u - off && off <= 0x97000u) ||
-           (off >= 0xE0000u && off <= 0xFC000u && n <= 0xFC000u - off);
+           (off >= 0xE0000u && off <= 0xFC000u && n <= 0xFC000u - off) ||
+           (res_hi && off >= res_lo && off <= res_hi && n <= res_hi - off);
 }
 static int ldr_fread(uint32_t off, void *p, uint32_t n)
 {
@@ -146,6 +150,11 @@ static void ldr_record_clear(void) {}
 static int ldr_erase_begin(uint32_t off) { return ldr_erase(off); }
 static int ldr_erase_end(void) { return 0; }
 static void ldr_progress(uint32_t done, uint32_t total) { (void)done; (void)total; port_poll(); }
+static void ldr_res_window(uint32_t lo, uint32_t hi)
+{
+    res_lo = lo;
+    res_hi = hi;
+}
 #include "../loader/ldr_core.c"
 
 /* ---- the device and the package (as tests/ldr_bounds_test.c) ---- */
@@ -202,11 +211,14 @@ static void dev_init(void)
     put_record(nor + REC_STOCK);
     fill(GLOB_LO, NOR_SIZE, 15);
 }
-static int pkg_write(const char *path)
+#define RES_BASE 0xAB000u
+#define RES_SIZE 0xB000u
+#define RES_OFF (0x400u + LDR_APP_HI)
+static int pkg_write(const char *path, int res)
 {
-    static uint8_t img[0x400 + LDR_APP_HI];
-    uint8_t ent[2][0x50], *hdr = img, *fl = img + 0x400;
-    uint32_t i, k, sz = LDR_APP_HI;
+    static uint8_t img[RES_OFF + RES_SIZE];
+    uint8_t ent[3][0x50], *hdr = img, *fl = img + 0x400, *r = img + RES_OFF;
+    uint32_t i, k, sz = LDR_APP_HI, ne = res ? 3u : 2u, len = RES_SIZE - 32u - 0x620u;
     FILE *f;
     memcpy(fl, nor, 0x4000);
     rng = 20;
@@ -223,17 +235,32 @@ static int pkg_write(const char *path)
     ota_wr32(ent[1] + 8, 0x200);
     ota_wr32(ent[1] + 12, 0x200);
     memcpy(ent[1] + 0x40, "ota.bin", 7);
-    for (i = 0; i < 2u; i++) {
+    if (res) {                                           /* res.bin: its record, the payload, 0xFF to the sector */
+        memset(r, 0xFF, RES_SIZE);
+        for (i = 0; i < len; i++) r[32 + i] = (uint8_t)rnd();
+        memset(r, 0, 32);
+        ota_wr32(r, LDR_RES_MAGIC);
+        ota_wr32(r + 4, len);
+        ota_wr32(r + 8, ldr_crc32(r + 32, len));
+        ota_wr32(r + 28, ldr_crc32(r, 28));
+        ota_wr16(ent[2], LDR_RES_TYPE);
+        ota_wr32(ent[2] + 8, RES_OFF);
+        ota_wr32(ent[2] + 12, RES_SIZE);
+        ota_wr32(ent[2] + LDR_RES_AT, RES_BASE);
+        memcpy(ent[2] + 0x40, "res.bin", 7);
+    }
+    for (i = 0; i < ne; i++) {
         ota_jl_enc(ent[i], 0x50);
         memcpy(hdr + 0x40 + i * 0x50u, ent[i], 0x50);
     }
-    ota_wr32(hdr + 4, 0x400 + sz);
-    ota_wr16(hdr + 8, 2);
-    ota_wr16(hdr + 2, ota_crc16(hdr + 0x40, 2 * 0x50u, 0));
+    ota_wr32(hdr + 4, res ? RES_OFF + RES_SIZE : 0x400 + sz);
+    ota_wr16(hdr + 8, ne);
+    ota_wr16(hdr + 2, ota_crc16(hdr + 0x40, ne * 0x50u, 0));
     ota_wr16(hdr, ota_crc16(hdr + 2, 0x3E, 0));
     ota_jl_enc(hdr, 0x40);
     memcpy(hdr + 0x200, "FELUCCA-LOADER-1", 16);      /* where ota.bin's entry says the loader is: this family's mark */
-    if (!(f = fopen(path, "wb")) || fwrite(img, 1, sizeof img, f) != sizeof img || fclose(f))
+    k = res ? RES_OFF + RES_SIZE : RES_OFF;
+    if (!(f = fopen(path, "wb")) || fwrite(img, 1, k, f) != k || fclose(f))
         return 1;
     return 0;
 }
@@ -251,7 +278,7 @@ int main(int argc, char **argv)
         return 2;
     if (!strcmp(argv[1], "init")) {
         dev_init();
-        return argc > 3 ? pkg_write(argv[3]) : 2;
+        return argc > 3 ? pkg_write(argv[3], argc > 4 && !strcmp(argv[4], "res")) : 2;
     }
     if (!strcmp(argv[1], "rearm")) {
         memset(nor + 0xE4000, 0xFF, 0x1000);

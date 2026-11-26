@@ -8,10 +8,14 @@
  *   C0_RD_UACNT  ... data reads, the same
  *   C0_WR_UACNT  ... data writes, the same
  *
- * Not verified on hardware. Whether TL_CKCNT counts without anything enabled is unknown: the caller
- * checks that it moves (fm1_perf_cycles_run) and falls back to TIMER4. The three stall counts are
- * enabled by DBG_CON bits 0-2 ("if/of/ex_inv_en" in the SDK, which may also arm fault exceptions):
- * only when asked, never at boot. Felucca's guards use DBG_EN (0x340), not DBG_CON (0x344). */
+ * DBG_CON bits 0-2 ("if/of/ex_inv_en" in the SDK) start all four, TL_CKCNT too: with DBG_CON at 0, as at
+ * boot, TL_CKCNT stays still (measured on an FM-1, felucca-bsp#18: 360,031 counts a ms with the bits set,
+ * 0 before and after; the SDK's cpu_effic_init sets them before it reads any counter). So
+ * fm1_perf_stalls_enable(1) is what starts the cycle counter as well; until then fm1_perf_cycles_run
+ * is 0 and a caller falls back to TIMER4. DBG_CON is written behind the debug unlock (DBG_WR_EN, as
+ * fm1_guard.h), which is left as it was found. The bits are set only when asked, never at boot: whether
+ * they are safe while the app runs (they may also arm fault exceptions) is not known. Felucca's guards use
+ * DBG_EN (0x340), not DBG_CON (0x344). */
 #pragma once
 #include <stdint.h>
 #include "fm1_time.h"
@@ -21,6 +25,9 @@
 #define FM1_C0_WR_UACNTL (*(volatile uint32_t *)0x1EEE210u)
 #define FM1_C0_TL_CKCNTL (*(volatile uint32_t *)0x1EEE218u)
 #define FM1_DBG_CON (*(volatile uint32_t *)0x1EEE344u)
+#ifndef FM1_DBG_WR_EN
+#define FM1_DBG_WR_EN (*(volatile uint32_t *)0x1EEE240u)   /* (as fm1_irq.h) */
+#endif
 
 static inline uint32_t fm1_perf_cycles(void) { return FM1_C0_TL_CKCNTL; }
 
@@ -40,10 +47,16 @@ static inline void fm1_perf_stalls(uint32_t s[3])
     s[2] = FM1_C0_WR_UACNTL;
 }
 
+/* DBG_CON bits 0-2: the three stall counts and the cycle counter (TL_CKCNT) on or off */
 static inline void fm1_perf_stalls_enable(int on)
 {
+    uint32_t was = FM1_DBG_WR_EN & 1u;          /* (writing 0xE7 toggles the unlock) */
+    if (!was)
+        FM1_DBG_WR_EN = 0xE7u;
     if (on)
         FM1_DBG_CON |= 0x7u;
     else
         FM1_DBG_CON &= ~0x7u;
+    if (!was)
+        FM1_DBG_WR_EN = 0xE7u;
 }

@@ -323,7 +323,8 @@ static void app_main(void)
     int32_t knob = 0, batt = 0;
     uint32_t knob_w = ~0u, batt_w = ~0u;            /* the bars' widths on the screen (~0: not drawn yet) */
     {
-        flash_ok = fl_jedec() == 0x856014u;       /* the stock 1 MiB part */
+        uint32_t id = fl_jedec();
+        flash_ok = id == 0x856014u || id == 0xB36014u;  /* the 1 MiB parts: Puya P25Q80 (stock), UC25HQ80 (newer units) */
         if (flash_ok)
             ota_boot_cleanup();                 /* what an interrupted update left behind */
     }

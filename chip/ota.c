@@ -38,14 +38,24 @@
 #define OTA_AREA FL_OTA_LO
 #endif
 #if !defined(FELUCCA_LOADER) && !defined(LDR_LAYOUT) && (!defined(OTA_BOARD_FL_LEN) || !defined(OTA_BOARD_RT_OFF) || !defined(OTA_BOARD_RT_LEN) || \
-    !defined(OTA_BOARD_USR_LO) || !defined(OTA_BOARD_USR_LEN) || !defined(OTA_PARM_ID))
-#error "chip/ota.c on a board's own flash map: define OTA_BOARD_FL_LEN, OTA_BOARD_RT_*, OTA_BOARD_USR_* and OTA_PARM_ID"
+    !defined(OTA_BOARD_USR_LO) || !defined(OTA_BOARD_USR_LEN) || !defined(OTA_REC_NAME))
+#error "chip/ota.c on a board's own flash map: define OTA_BOARD_FL_LEN, OTA_BOARD_RT_*, OTA_BOARD_USR_* and OTA_REC_NAME"
 #endif
 #endif
+/* where the package's update loader is staged, and the name the update record gives it (its USB identity while it
+ * runs): the FM-1's by default; a board with another flash map or another stock identity sets its own before this
+ * file (the record's name field holds 32 bytes) */
 #ifndef OTA_AREA
-#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB (the FM-1's; a board's fm1_flash.h FL_OTA_LO) */
+#define OTA_AREA 0x000E0000u                     /* staged loader, 5 x 4 KiB */
 #endif
+#ifndef OTA_AREA_LEN
 #define OTA_AREA_LEN 0x5000u
+#endif
+#ifndef OTA_REC_NAME
+#define OTA_REC_NAME "ota-FM-1_015"
+#endif
+_Static_assert(sizeof OTA_REC_NAME - 1u <= 32u, "OTA_REC_NAME: 32 bytes at most (UPDATA_PARM +8 .. +39)");
+_Static_assert((OTA_AREA & 0xFFFu) == 0u && (OTA_AREA_LEN & 0xFFFu) == 0u, "OTA_AREA, OTA_AREA_LEN: whole 4 KiB sectors");
 #define OTA_RES (OTA_AREA + OTA_AREA_LEN - 0x100u)  /* 0xE4F00 = 4K boundary - 256: SPL scan */
 #ifndef OTA_FRAME_MAX
 #define OTA_FRAME_MAX 640u                       /* 512-B response = 605 wire bytes (the loader: a 4 KiB one) */
@@ -129,10 +139,6 @@ static uint32_t ota_unpack7(const uint8_t *in, uint32_t n, uint8_t *out, uint32_
     return o;
 }
 
-#ifndef OTA_PARM_ID
-#define OTA_PARM_ID "ota-FM-1_015"                /* the update record's identity (a board may name its own) */
-#endif
-_Static_assert(sizeof OTA_PARM_ID <= 64u, "OTA_PARM_ID: 63 characters at most (the record's identity, bytes 8..71)");
 #ifdef OTA_BOARD_FL_LEN
 _Static_assert(OTA_BOARD_RT_LEN <= 512u, "OTA_BOARD_RT_LEN: the region table is read whole into ota_stage's 512 bytes");
 #endif
@@ -325,6 +331,22 @@ static int ota_boot_valid(uint32_t fl_off, uint32_t fl_len, uint8_t *b)
     return pcrc == pwant && fcrc == dcrc ? 0 : -5;
 }
 
+/* the update record (UPDATA_PARM, update_mode_api_v2 layout, 80 bytes) that makes the SPL run the staged loader:
+ * type, result, magic, the loader's name (OTA_REC_NAME), its address (OTA_AREA), the CRC16 over bytes 2..79 */
+static void ota_record(uint8_t *parm, uint32_t n)   /* (n: its buffer, all cleared: the flash copy is written whole) */
+{
+    uint32_t i;
+    for (i = 0; i < n; i++)
+        parm[i] = 0;
+    ota_wr16(parm + 2, 0x5A0Du);
+    ota_wr16(parm + 4, 0x5A01u);
+    ota_wr16(parm + 6, 0x5441u);
+    for (i = 0; i < sizeof OTA_REC_NAME - 1u; i++)
+        parm[8 + i] = (uint8_t)OTA_REC_NAME[i];      /* the loader's own USB identity */
+    ota_wr32(parm + 72, OTA_AREA);
+    ota_wr16(parm, ota_crc16(parm + 2, 78, 0));
+}
+
 /* JLFS head "LOADER.BIN" in front of the staged loader (vm_update_defrag), written last */
 static int ota_stage_head(uint32_t len)
 {
@@ -476,7 +498,6 @@ static int ota_session(void)
 {
     static uint8_t parm[112];
     uint8_t back[112];
-    uint32_t i;
     int rc;
     ota_deadline = ota_now_ms() + 120000u;          /* step 1 normally takes ~5 s; a stalled host gives up after 2 min */
     rc = ota_stage();
@@ -486,15 +507,7 @@ static int ota_session(void)
         return rc;
     }
     /* 5./7. UPDATA_PARM (update_mode_api_v2 layout), flash copy first */
-    for (i = 0; i < sizeof parm; i++)
-        parm[i] = 0;
-    ota_wr16(parm + 2, 0x5A0Du);
-    ota_wr16(parm + 4, 0x5A01u);
-    ota_wr16(parm + 6, 0x5441u);
-    for (i = 0; i < sizeof OTA_PARM_ID - 1u; i++)
-        parm[8 + i] = (uint8_t)OTA_PARM_ID[i];       /* the loader's own USB identity */
-    ota_wr32(parm + 72, OTA_AREA);
-    ota_wr16(parm, ota_crc16(parm + 2, 78, 0));
+    ota_record(parm, sizeof parm);
 #if FELUCCA_OTA_DRYRUN
     ota_unstage();
     ota_show(9, 1);                                 /* 1 = dry run complete */
